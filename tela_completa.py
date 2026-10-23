@@ -1209,9 +1209,15 @@ class Painel:
         self.estava_tocando = tocando
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
         inicio_compor = time.perf_counter()
-        base = bg.convert("RGBA")
-        base.alpha_composite(ov)
-        quadro = base.convert("RGB")
+        if bg.mode == "RGB":
+            # Fundo opaco do FFmpeg: aplica o alfa diretamente em RGB, evitando
+            # as cópias intermediárias RGBA e a conversão de volta por quadro.
+            quadro = bg.copy()
+            quadro.paste(ov, (0, 0), ov)
+        else:
+            base = bg.convert("RGBA")
+            base.alpha_composite(ov)
+            quadro = base.convert("RGB")
         self._diag_tempos["compor_ms"] = (time.perf_counter() - inicio_compor) * 1000
         return quadro
 

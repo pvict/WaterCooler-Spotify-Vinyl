@@ -33,6 +33,7 @@ TIMEOUT_FILA_TELA = 2.0
 
 # Capturas opcionais: reative se precisar investigar stutter ou mosaico.
 DIAGNOSTICO_VIDEO = False
+DIAGNOSTICO_QUADROS = True  # métricas leves; não copia nem grava vídeo
 CAPTURA_ANTES = 6.0
 CAPTURA_DEPOIS = 15.0
 CAPTURA_MEMORIA_MAX = 6 * 1024 * 1024
@@ -247,6 +248,11 @@ class FilaVideo(queue.Queue):
         with self.mutex:
             return self._bytes
 
+    def aguardar_espaco(self, limite, timeout=0.05):
+        """Queue.get() notifica not_full ao consumir um pedaço do vídeo."""
+        with self.not_full:
+            return self.not_full.wait_for(lambda: self._bytes < limite, timeout)
+
 
 class Codificador:
     """ffmpeg em tempo real: recebe quadros RGB, entrega H.264 (Annex B)."""
@@ -288,7 +294,10 @@ class Codificador:
             self.saida.put((chegada, dados))
 
     def enviar_quadro(self, img):
-        self.proc.stdin.write(img.convert("RGB").tobytes())
+        # Image.convert() também faz uma cópia quando o modo já é RGB.
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        self.proc.stdin.write(img.tobytes())
         self.proc.stdin.flush()
 
     def fechar(self):
@@ -327,10 +336,41 @@ class EnviadorUSB(threading.Thread):
         self._ultimo_log_fila_tela = 0.0
         self._pendente = None
         self.comandos = queue.Queue()
+        self._logs_video = queue.Queue(maxsize=64)
+        self._encerrar_logs = threading.Event()
         self.erro = None
         self.m = {"comandos": 0, "bytes": 0, "delays": 0, "t_delay": 0.0, "t_envio": 0.0,
                   "resp_min": 255, "resp_max": 0, "falhas": 0, "lat_soma": 0.0, "lat_max": 0.0,
-                  "fila_tela_max": 0, "consultas_fila_tela": 0, "t_fila_tela": 0.0}
+                  "fila_tela_max": 0, "consultas_fila_tela": 0, "t_fila_tela": 0.0,
+                  "logs_video_omitidos": 0}
+
+    def registrar_telemetria(self, mensagem):
+        """O registro rotineiro não deve bloquear a alimentação da tela."""
+        if self.log is None or self._encerrar_logs.is_set():
+            return
+        try:
+            self._logs_video.put_nowait((time.time_ns() // 1_000_000, mensagem))
+        except queue.Full:
+            # Somente telemetria de vídeo; erros USB e registros ARGB continuam
+            # no caminho original. O limite evita acumular memória se o disco parar.
+            self.m["logs_video_omitidos"] += 1
+
+    def _registrar_telemetria(self):
+        omitidos = 0
+        while not self._encerrar_logs.is_set() or not self._logs_video.empty():
+            try:
+                instante, mensagem = self._logs_video.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                total = self.m["logs_video_omitidos"]
+                if total != omitidos:
+                    self.log(f"diagnóstico vídeo: {total - omitidos} registros rotineiros omitidos por fila cheia")
+                    omitidos = total
+                self.log(f"{mensagem} evento_utc_ms={instante}")
+            except Exception:
+                # O callback de diagnóstico não interfere no controle USB.
+                pass
 
     def executar(self, funcao):
         """Roda funcao(dev) na thread do USB (brilho, etc.)."""
@@ -383,7 +423,7 @@ class EnviadorUSB(threading.Thread):
         registrar = self.log and inicio - self._ultimo_log_fila_tela >= 1.0
         if registrar:
             self._ultimo_log_fila_tela = inicio
-            self.log(f"vídeo USB: aguardando fila_tela={inicial} baixar para {FILA_TELA_MAX}")
+            self.registrar_telemetria(f"vídeo USB: aguardando fila_tela={inicial} baixar para {FILA_TELA_MAX}")
         try:
             while profundidade > FILA_TELA_MAX and not self.parar.is_set():
                 if time.monotonic() - inicio >= TIMEOUT_FILA_TELA:
@@ -403,7 +443,7 @@ class EnviadorUSB(threading.Thread):
             espera = time.monotonic() - inicio
             self.m["t_fila_tela"] += espera
             if registrar:
-                self.log(f"vídeo USB: consulta encerrada fila_tela={profundidade} espera={espera:.3f}s fila_pc={self.cod.saida.qsize()}")
+                self.registrar_telemetria(f"vídeo USB: consulta encerrada fila_tela={profundidade} espera={espera:.3f}s fila_pc={self.cod.saida.qsize()}")
 
     def _lote(self):
         if self._pendente is not None:
@@ -436,8 +476,16 @@ class EnviadorUSB(threading.Thread):
     def run(self):
         falhas_seguidas = 0
         try:
+            if self.log is not None:
+                try:
+                    threading.Thread(target=self._registrar_telemetria,
+                                     name="VideoTelemetria", daemon=True).start()
+                except Exception:
+                    # Telemetria é opcional, inclusive quando falta recurso
+                    # para criar sua thread. O envio USB continua normalmente.
+                    self._encerrar_logs.set()
             if self.log:
-                self.log(f"vídeo USB: limpeza extra={USB_LIMPEZA_MS}ms; timeout da resposta=2000ms; controle fila_tela máximo={FILA_TELA_MAX}; limite fila_pc={LIMITE_FILA_BYTES} bytes")
+                self.registrar_telemetria(f"vídeo USB: limpeza extra={USB_LIMPEZA_MS}ms; timeout da resposta=2000ms; controle fila_tela máximo={FILA_TELA_MAX}; limite fila_pc={LIMITE_FILA_BYTES} bytes")
             while not self.parar.is_set():
                 while not self.comandos.empty():
                     self.comandos.get()(self.dev)
@@ -465,7 +513,7 @@ class EnviadorUSB(threading.Thread):
                     if self.cod.captura is not None:
                         self.cod.captura.marcar(f"USB: fila_tela={status}, fila_pc={fila}, latência={lat:.3f}s")
                 if self.log and (falha_resposta or agora_log - self._ultimo_log_video >= intervalo_log):
-                    self.log(
+                    self.registrar_telemetria(
                         f"vídeo USB: resposta={status} lote={len(dados)} bytes "
                         f"fila_pc={fila} fila_pc_bytes={self.cod.saida.bytes_pendentes()} "
                         f"fila_tela={status} latência={lat:.3f}s suspeito={anomalia} "
@@ -494,6 +542,8 @@ class EnviadorUSB(threading.Thread):
                     self.m["t_delay"] += time.monotonic() - t2
         except Exception as exc:
             self.erro = exc
+        finally:
+            self._encerrar_logs.set()
 
 
 class PipelineAoVivo:
@@ -527,7 +577,7 @@ class PipelineAoVivo:
             self.captura.marcar(evento)
 
     def _medir(self, inicio, gerar, enviar):
-        if not DIAGNOSTICO_VIDEO:
+        if not (DIAGNOSTICO_VIDEO or DIAGNOSTICO_QUADROS):
             return
         j = self._janela
         try:
@@ -553,7 +603,7 @@ class PipelineAoVivo:
             self.marcar_evento(f"quadro atrasado: gerar={1000 * gerar:.1f}ms ffmpeg={1000 * enviar:.1f}ms intervalo={1000 * intervalo_quadro:.1f}ms")
         intervalo = 1.0 if j["transicao"] else 5.0
         if self.log and agora - self._t_janela >= intervalo:
-            self.log(
+            self.env.registrar_telemetria(
                 f"diagnóstico quadros: fps={j['quadros'] / (agora - self._t_janela):.1f} "
                 f"lentos={j['lentos']}/{j['quadros']} gerar_máx={1000 * j['gerar_max']:.1f}ms "
                 f"fundo_máx={j['fundo_ms']:.1f}ms animação_máx={j['animacao_ms']:.1f}ms "
@@ -578,9 +628,10 @@ class PipelineAoVivo:
                 # Limita a antecipação do vídeo no PC por bytes, pois read1()
                 # entrega pedaços de tamanhos diferentes. A fila da tela e os
                 # bytes H.264 já produzidos continuam sob o controle do USB.
-                if self.cod.saida.bytes_pendentes() >= LIMITE_FILA_BYTES:
-                    self.parar.wait(0.005)
+                if not self.cod.saida.aguardar_espaco(LIMITE_FILA_BYTES):
                     continue
+                if self.parar.is_set():
+                    break
                 tg = time.monotonic()
                 # O H.264 apresenta cada quadro com duração de 1/fps. As animações
                 # seguem esse mesmo relógio, inclusive após uma espera pela fila.
