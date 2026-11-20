@@ -187,6 +187,49 @@ class ModoClipeTest(unittest.TestCase):
         ]
         self.assertEqual([c.id for c in classificar_clipes(candidatos, musica, 216)], ["sBzrzS1Ag_g"])
 
+    def test_titulo_com_projeto_do_proprio_artista_encontra_love_exalando(self):
+        musica = ("Love Exalando", "Leo Balbinotti")
+        clipe = dict(entrada("s532TOnC5Wg", "Leo Balbinotti - Love Exalando (Novo Eu)",
+                             "Leo Balbinotti", 148), channel_is_verified=True)
+        catalogo = entrada("aaaaaaaaaaa", "Love Exalando", "Leo Balbinotti", 143)
+        candidatos = classificar_clipes([catalogo, clipe], musica, 136.65)
+        self.assertEqual([c.id for c in candidatos], ["s532TOnC5Wg", "aaaaaaaaaaa"])
+        self.assertTrue(candidatos[0].exigir_movimento)
+
+    def test_complementos_de_projeto_ainda_exigem_autoria_e_faixa_compativeis(self):
+        def video(id_video, titulo, duracao=200, canal="Artista", verificado=True):
+            return dict(entrada(id_video, titulo, canal, duracao), channel_is_verified=verificado)
+
+        candidatos = [
+            video("aaaaaaaaaaa", "Artista - Brisa da Praia | Sessões de Verão"),
+            video("bbbbbbbbbbb", "Artista - Brisa da Praia (Projeto Azul) (Vídeo Oficial)"),
+            video("ccccccccccc", "Artista - Brisa da Praia (Projeto Azul)", canal="Outro Canal"),
+            video("ddddddddddd", "Artista - Brisa da Praia (Projeto Azul)", verificado=False),
+            video("eeeeeeeeeee", "Artista - Brisa da Praia (Remix)"),
+            video("fffffffffff", "Artista - Brisa da Praia (Ao Vivo)"),
+            video("ggggggggggg", "Artista - Brisa da Praia (Demo)"),
+            video("hhhhhhhhhhh", "Artista - Brisa da Praia (Projeto Azul)", duracao=260),
+            video("iiiiiiiiiii", "Artista - Brisa da Praia de Manhã (Projeto Azul)"),
+            video("jjjjjjjjjjj", "Artista - Brisa da Praia (Projeto Azul) (Lyrics)"),
+            video("kkkkkkkkkkk", "Artista - Brisa da Praia"),
+        ]
+        resultados = classificar_clipes(candidatos, ("Brisa da Praia", "Artista"), 200)
+        self.assertEqual([c.id for c in resultados], ["kkkkkkkkkkk", "bbbbbbbbbbb", "aaaaaaaaaaa"])
+        self.assertTrue(all(c.exigir_movimento for c in resultados[1:]))
+
+    def test_prioriza_visualizacoes_entre_clipes_da_faixa(self):
+        def resultado(id_video, titulo, vistas):
+            return dict(entrada(id_video, titulo, "Jorge & Mateus Oficial", 158), view_count=vistas)
+
+        candidatos = [
+            resultado("aaaaaaaaaaa", "Jorge & Mateus - Logo Eu (Clipe)", 1_500_000),
+            resultado("bbbbbbbbbbb", "Jorge & Mateus - Logo Eu (Vídeo Oficial)", 200_000),
+            resultado("ccccccccccc", "Jorge & Mateus - Logo Eu [Áudio Oficial]", 80_000_000),
+            resultado("ddddddddddd", "Jorge & Mateus - Sosseguei (Vídeo Oficial)", 200_000_000),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, ("Logo Eu", "Jorge e Mateus"), 157)],
+                         ["aaaaaaaaaaa", "bbbbbbbbbbb"])
+
     def test_encontra_o_video_do_artista_quando_o_titulo_so_acrescenta_mencoes(self):
         musica = ("Resenha da Muierada", "Muierada")
         candidatos = [
@@ -244,7 +287,7 @@ class ModoClipeTest(unittest.TestCase):
         busca = {"entries": [entrada("bbbbbbbbbbb", "A Faixa"), clipe]}
         meta = dict(clipe, channel="Artista")
         with patch.object(fonte, "_youtube", side_effect=[json.dumps(r).encode() for r in
-                         (busca, busca, meta)]):
+                         (busca, meta)]):
             self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa", "bbbbbbbbbbb"])
 
     def test_distingue_artista_topic_de_canal_automatico(self):
@@ -265,18 +308,20 @@ class ModoClipeTest(unittest.TestCase):
         with patch.object(fonte, "_youtube", side_effect=[b'{"entries":[]}', json.dumps(resposta).encode()]) as yt:
             self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa"])
         consultas = [chamada.args[0][-1] for chamada in yt.call_args_list]
-        self.assertEqual(consultas, ["ytsearch12:Foreigner Girl on the Moon official music video",
-                                     "ytsearch12:Foreigner Girl on the Moon"])
+        self.assertEqual(consultas, ["ytsearch20:Foreigner Girl on the Moon",
+                                     'ytsearch20:Foreigner "Girl on the Moon"'])
 
-    def test_preserva_resultado_quando_a_busca_complementar_falha(self):
+    def test_consulta_simples_com_resultado_evitar_busca_complementar(self):
         musica = ("Girl on the Moon - 2025 Remix", "Foreigner")
         chave = (musica, 1)
         snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 230}
         fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
         resposta = {"entries": [entrada("aaaaaaaaaaa", "Foreigner - Girl on the Moon (1981) HD",
                                         "BackToRock", 228)]}
-        with patch.object(fonte, "_youtube", side_effect=[json.dumps(resposta).encode(), RuntimeError]):
+        with patch.object(fonte, "_youtube", return_value=json.dumps(resposta).encode()) as youtube:
             self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa"])
+        self.assertEqual([c.args[0][-1] for c in youtube.call_args_list],
+                         ["ytsearch20:Foreigner Girl on the Moon"])
 
     def test_tenta_proximo_video_quando_principal_falha_ou_e_estatico(self):
         musica = ("Girl on the Moon - 2025 Remix", "Foreigner")

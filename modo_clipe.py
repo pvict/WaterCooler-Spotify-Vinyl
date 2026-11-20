@@ -43,7 +43,8 @@ IGNORAR = ("lyrics", "lyric", "letra", "karaoke", "cover", "reaction", "reacao",
 OFICIAL = ("official music video", "official video", "official hd video",
            "official 4k video", "clipe oficial", "video oficial", "videoclipe oficial",
            "official mv", "clip officiel", "video musical oficial")
-MARCADOR_VIDEO = ("music video", "videoclipe", "video musical", "visualizer", "visualiser", "mv", "m v")
+MARCADOR_VIDEO = ("music video", "videoclipe", "video musical", "clipe", "webclipe",
+                  "visualizer", "visualiser", "mv", "m v")
 SUFIXO_SPOTIFY = re.compile(
     r"\s+(?:[-–—]\s+|[\[(])(?=(?:(?:7|12)\s*(?:[\"″”'’]{1,2}|-inch)\s*"
     r"(?:single\s+)?(?:edit|mix|version)\b|"
@@ -60,6 +61,9 @@ SUFIXO_VIDEO = re.compile(
     r"\s+(?:official (?:(?:hd|hq|4k|8k|animated|remastered) )*(?:music video|video|mv|m\s*/\s*v)|"
     + "|".join(sorted(OFICIAL + MARCADOR_VIDEO, key=len, reverse=True)) + r"|m\s*/\s*v)\s*$", re.I)
 GRUPO_FINAL = re.compile(r"\s*[,;]?\s*[\[({]([^\])}]+)[\])}]\s*$")
+PROJETO_FINAL = re.compile(r"\s*[|•●·]\s*([^|•●·]+)$")
+OUTRA_VERSAO = ("demo", "alternate version", "versao alternativa", "ensaio", "rehearsal",
+                "a capella", "a cappella", "acapella", "mashup", "medley")
 SEPARADOR_VIDEO = re.compile(r"\s+-\s+|:\s+|\s*[–—|•●·]\s*")
 TITULO_CITADO = re.compile(r"\s+(?=[\"“‘'])")
 ROTULO_TECNICO = re.compile(r"(?:(?:hd|hq|fhd|uhd|[248]k|\d{2,3} ?fps|(?:19|20)\d{2}) ?)+$")
@@ -171,9 +175,12 @@ def grafia_proxima(esperada, encontrada):
             menor[i:i + 2] == maior[i:i + 2][::-1] and menor[i + 2:] == maior[i + 2:])
 
 
-def extras_do_titulo(titulo, faixa, prefixo, aceitar_grafia):
+TITULO_EXATO, TITULO_COM_PROJETO, TITULO_GRAFIA_PROXIMA = range(3)
+
+
+def extras_do_titulo(titulo, faixa, prefixo, aceitar_grafia, aceitar_projeto):
     sem_mencoes = MENCOES_TITULO.sub("", titulo)
-    aproximacao = None
+    projeto = aproximacao = None
     for variante in dict.fromkeys((sem_mencoes, titulo)):
         sem_participacao = PARTICIPACAO_VIDEO.split(variante, maxsplit=1)[0]
         nome = normalizar(variante).removeprefix(prefixo)
@@ -183,14 +190,17 @@ def extras_do_titulo(titulo, faixa, prefixo, aceitar_grafia):
             if apelido and (
                     normalizar(apelido[2]) == faixa and outro_alfabeto(apelido[1], apelido[2]) or
                     normalizar(apelido[1]) == faixa and outro_alfabeto(apelido[2], apelido[1])):
-                return nome.removeprefix(normalizar(limpo)), False
+                return nome.removeprefix(normalizar(limpo)), TITULO_EXATO
             for t in (texto, limpo):
                 chave = normalizar(titulo_base(t)).removeprefix(prefixo)
                 if chave == faixa:
-                    return nome.removeprefix(chave), False
+                    return nome.removeprefix(chave), TITULO_EXATO
                 if aceitar_grafia and grafia_proxima(faixa, chave):
-                    aproximacao = nome.removeprefix(chave), True
-    return aproximacao
+                    aproximacao = nome.removeprefix(chave), TITULO_GRAFIA_PROXIMA
+            marca = (GRUPO_FINAL.search(limpo) or PROJETO_FINAL.search(limpo)) if aceitar_projeto else None
+            if marca and normalizar(limpo[:marca.start()]).removeprefix(prefixo) == faixa:
+                projeto = nome.removeprefix(faixa), TITULO_COM_PROJETO
+    return projeto or aproximacao
 
 
 class CandidatoClipe(NamedTuple):
@@ -208,9 +218,14 @@ def classificar_clipes(entradas, musica, duracao):
     participacao = PARTICIPACAO_VIDEO.split(" " + subtitulo, maxsplit=1)
     convidado = participacao[1] if len(participacao) == 2 else ""
     edicao_curta = EDICAO_CURTA.search(subtitulo) is not None
-    artistas = tuple(dict.fromkeys(filter(None, (
-        normalizar_artista(artista), normalizar_artista(re.split(r"\s*[,;]\s*|\s+feat\.?\s+", artista,
-                                                               maxsplit=1, flags=re.I)[0])))))
+    nomes_artista = (
+        artista,
+        re.split(r"\s*[,;]\s*|\s+feat\.?\s+", artista, maxsplit=1, flags=re.I)[0],
+        re.sub(r"\s+(?:e|and)\s+", " & ", artista, flags=re.I),
+        artista.replace("&", " e "),
+        artista.replace("&", " and "),
+    )
+    artistas = tuple(dict.fromkeys(filter(None, map(normalizar_artista, nomes_artista))))
     if not faixa or not artistas:
         return []
 
@@ -236,16 +251,19 @@ def classificar_clipes(entradas, musica, duracao):
         segundos = entrada.get("duration") or 0
         diferenca = abs(segundos - duracao) if segundos and duracao else 0
         verificado = entrada.get("channel_is_verified") is True
-        aceitar_grafia = (canal_artista and verificado and segundos and duracao
-                          and diferenca <= max(10, duracao * 0.12))
-        correspondencia = extras_do_titulo(faixa_video, faixa, prefixo, aceitar_grafia)
+        fonte_com_duracao = canal_artista and verificado and segundos and duracao
+        aceitar_grafia = fonte_com_duracao and diferenca <= max(10, duracao * 0.12)
+        aceitar_projeto = fonte_com_duracao and diferenca <= min(15, max(8, duracao * 0.10))
+        correspondencia = extras_do_titulo(faixa_video, faixa, prefixo, aceitar_grafia, aceitar_projeto)
         if correspondencia is None:
             continue
-        extras, aproximado = correspondencia
+        extras, tipo_titulo = correspondencia
         extras += " " + rotulo_inicial
 
         if (any(contem(extras, palavra) for palavra in IGNORAR)
                 or {a for a in ARRANJOS if contem(extras, a)} != arranjos):
+            continue
+        if tipo_titulo == TITULO_COM_PROJETO and any(contem(extras, palavra) for palavra in OUTRA_VERSAO):
             continue
         remix = MARCADOR_REMIX.search(extras) is not None
         if remix and not MARCADOR_REMIX.search(subtitulo):
@@ -253,24 +271,27 @@ def classificar_clipes(entradas, musica, duracao):
         oficial = ((OFFICIAL_VIDEO.search(extras) or any(contem(extras, t) for t in OFICIAL))
                    and not any(contem(extras, t) for t in ("unofficial", "nao oficial", "fan made")))
         tem_rotulo = oficial or any(contem(extras, t) for t in MARCADOR_VIDEO)
-        if aproximado and not tem_rotulo:
+        if tipo_titulo == TITULO_GRAFIA_PROXIMA and not tem_rotulo:
             continue
         margem = max(45, duracao * 0.3) if tem_rotulo else max(20, duracao * 0.2)
         integral = (edicao_curta and oficial and segundos > duracao
                     and diferenca <= min(360, duracao * 1.2))
-        com_cenas_extras = (not aproximado and oficial and canal_artista and verificado
+        com_cenas_extras = (tipo_titulo == TITULO_EXATO and oficial and canal_artista and verificado
                             and segundos > duracao and diferenca <= min(150, duracao * 0.65))
         fora_da_margem = bool(segundos and duracao and diferenca > margem)
         if fora_da_margem and not (integral or com_cenas_extras):
             continue
         fonte_conhecida = canal_artista or (oficial and verificado)
-        # Em canais de artista, uploads com só o título frequentemente são áudio do catálogo.
+        # Um título sem créditos nem rótulos no próprio canal costuma ser áudio de catálogo.
         so_titulo_no_canal = not oficial and canal_artista and normalizar(titulo_video) == faixa
         falta_convidado = bool(convidado and not contem(extras, convidado))
-        prioridade = (aproximado, not oficial, remix, falta_convidado, fora_da_margem and not com_cenas_extras,
-                      so_titulo_no_canal, not fonte_conhecida,
+        vistas = entrada.get("view_count")
+        vistas = vistas if type(vistas) is int and vistas >= 0 else 0
+        prioridade = (-vistas, so_titulo_no_canal, tipo_titulo, not oficial, remix, falta_convidado,
+                      fora_da_margem and not com_cenas_extras, not fonte_conhecida,
                       not tem_rotulo, diferenca, ordem)
-        candidatos.append((prioridade, CandidatoClipe(video, oficial, fora_da_margem or aproximado)))
+        candidatos.append((prioridade, CandidatoClipe(video, oficial,
+                                                      fora_da_margem or tipo_titulo != TITULO_EXATO)))
         vistos.add(video)
     return [c for _, c in sorted(candidatos)]
 
@@ -542,14 +563,14 @@ class FonteClipe:
             faixa = titulo_base(titulo)
             subtitulo = normalizar(titulo.removeprefix(faixa))
             arranjos = [a for a in ARRANJOS if contem(subtitulo, a)]
-            consulta = " ".join([artista, faixa, *arranjos])
             entradas = []
             candidatos = []
             falha = None
-            for texto in (f"{consulta} official music video", consulta):
+            for nome in (faixa, f'"{faixa}"'):
+                texto = " ".join([artista, nome, *arranjos])
                 try:
                     saida = self._youtube(["--flat-playlist", "--dump-single-json", "--",
-                                           f"ytsearch12:{texto}"], chave)
+                                           f"ytsearch20:{texto}"], chave)
                 except RuntimeError as exc:
                     falha = exc
                     continue
@@ -557,7 +578,7 @@ class FonteClipe:
                     return []
                 entradas.extend(json.loads(saida).get("entries") or [])
                 candidatos = classificar_clipes(entradas, musica, duracao)
-                if candidatos and candidatos[0].oficial and not candidatos[0].exigir_movimento:
+                if candidatos:
                     break
             if not candidatos or not candidatos[0].oficial:
                 confirmada = self._confirmar_canal(entradas, candidatos, musica, duracao, chave)
