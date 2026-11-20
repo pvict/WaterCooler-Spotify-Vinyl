@@ -184,6 +184,26 @@ class ModoClipeTest(unittest.TestCase):
             fonte._fluxo = (chave, novo)
             self.assertIs(fonte.quadro(snap, 100.20), proxima)
 
+    def test_ajuste_pelo_audio_preserva_o_ultimo_quadro_do_clipe(self):
+        musica = ("Faixa", "Artista")
+        chave = (musica, 9)
+        snap = {"musica": musica, "reproducao_id": 9, "tocando": True, "pos": 4, "t_poll": 100}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        original, corrigido = QuadrosClipe(), QuadrosClipe()
+        anterior, novo = object(), object()
+        original.adicionar(4, anterior, threading.Event())
+        fonte._fluxo = chave, original
+        with patch("modo_clipe.time") as relogio:
+            relogio.monotonic.side_effect = [100, 100.08, 100.21]
+            self.assertIs(fonte.quadro(snap, 100), anterior)
+            original.ajuste_audio_em = 100.05
+            original.reposicionar.set()
+            fonte._fluxo = None
+            self.assertIs(fonte.quadro(snap, 100.08), anterior)
+            corrigido.adicionar(4.20, novo, threading.Event())
+            fonte._fluxo = chave, corrigido
+            self.assertIs(fonte.quadro(snap, 100.21), novo)
+
     def test_congela_ao_voltar_mas_libera_em_trocas_ou_pausas(self):
         musica = ("Título", "Artista")
         snap = {"musica": musica, "reproducao_id": 10, "tocando": True, "pos": 12, "t_poll": 100}

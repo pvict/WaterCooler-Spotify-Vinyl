@@ -76,7 +76,7 @@ Dê dois cliques em **Turing Vinyl.lnk**, na pasta do projeto. Use esse atalho n
 | **Clipe** | Procura a faixa no YouTube e mostra o clipe só na tela USB. O áudio continua no Spotify. |
 | **Gaming** | Repete um fundo preparado a 30 FPS, com menos processamento e sem informações da música. Desative para voltar ao modo escolhido. |
 
-Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` na pasta do projeto. Reabra o app. O modo usa uma integração não oficial com o YouTube. Durante a busca, em pausa ou se o clipe estiver indisponível, a tela mostra o vinil. Clipes com introdução ou edição diferente podem ficar fora de sincronia.
+Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` na pasta do projeto. Reabra o app. O modo usa uma integração não oficial com o YouTube. Durante a busca, em pausa ou se o clipe estiver indisponível, a tela mostra o vinil. Quando a captura por processo do Windows e o Chromaprint do FFmpeg estão disponíveis, o app compara pequenos trechos do áudio do Spotify com o áudio do clipe para ajustar a posição do vídeo. A análise acontece localmente, em memória. Edições muito diferentes ainda podem ter trechos sem correspondência confiável.
 
 | Controle | Para que serve |
 | --- | --- |

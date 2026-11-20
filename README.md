@@ -78,7 +78,7 @@ The interface labels are currently in Portuguese.
 | **Clipe** | Finds the track on YouTube and shows the music video on the USB display. Audio stays on Spotify. |
 | **Gaming** | Loops a prepared background at 30 FPS with reduced processing and no music overlays. Switch it off to restore your selected mode. |
 
-To enable **Clipe**, install [Node.js LTS](https://nodejs.org/) and run `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` from the project folder. Reopen the app. This mode uses an unofficial YouTube integration. The display shows vinyl while searching, when paused, or if the video is unavailable. Music videos with intros or different edits may be out of sync.
+To enable **Clipe**, install [Node.js LTS](https://nodejs.org/) and run `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` from the project folder. Reopen the app. This mode uses an unofficial YouTube integration. The display shows vinyl while searching, when paused, or if the video is unavailable. With Windows process loopback and an FFmpeg build that includes Chromaprint, the app compares short samples of Spotify audio with the clip to correct differences in timing. The samples are processed locally in memory. Clips with substantial edits may still have sections without a reliable match.
 
 | Control | What it does |
 | --- | --- |
