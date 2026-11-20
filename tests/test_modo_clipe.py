@@ -42,6 +42,64 @@ class ModoClipeTest(unittest.TestCase):
         candidatos = [entrada("aaaaaaaaaaa", "Artista - Coração (Official Video)")]
         self.assertIsNone(escolher_clipe(candidatos, ("Coração - Ao Vivo", "Artista"), 200))
 
+    def test_dvd_e_formas_equivalentes_de_ao_vivo_valem_para_qualquer_artista(self):
+        musica = ("Vento do Mar - Ao Vivo", "Artista")
+        candidatos = [
+            dict(entrada("aaaaaaaaaaa", "Artista - Vento do Mar (DVD No Teatro)", "Canal do show"),
+                 view_count=150),
+            dict(entrada("bbbbbbbbbbb", "Artista - Vento do Mar (Live in the Park)", "Canal do show"),
+                 view_count=1000),
+            dict(entrada("ccccccccccc", "Artista - Vento do Mar (En Vivo)", "Canal do show"),
+                 view_count=800),
+            dict(entrada("ddddddddddd", "Artista - Vento do Mar (Versão de Estúdio)", "Artista"),
+                 channel_is_verified=True, view_count=2500),
+            dict(entrada("eeeeeeeeeee", "Artista - Vento do Mar (DVD No Teatro) (Áudio Oficial)", "Artista"),
+                 channel_is_verified=True, view_count=5000),
+        ]
+        escolhidos = classificar_clipes(candidatos, musica, 200, "No Teatro (Ao Vivo)")
+        self.assertEqual([c.id for c in escolhidos], ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"])
+        self.assertTrue(escolhidos[0].exigir_movimento)
+
+    def test_nome_do_projeto_distingue_gravacoes_do_mesmo_artista(self):
+        musica = ("Acordando O Prédio - Ao Vivo", "Luan Santana")
+        candidatos = [
+            dict(entrada("mvWXaz0Gtbo", "Luan Santana - Acordando o Prédio (Vídeo Oficial)", "Luan Santana", 247),
+                 channel_is_verified=True, view_count=327_000_000),
+            dict(entrada("GPwGsv1te5M", "Luan Santana - Acordando o Prédio (Registro Histórico)", None, 214),
+                 view_count=2_800_000),
+            dict(entrada("eS7yRwHE0Ow", "Luan Santana - Acordando o Prédio (DVD 1977)", "Outro canal", 157),
+                 view_count=88_000),
+        ]
+        escolhidos = classificar_clipes(candidatos, musica, 212, "Registro Histórico Parte 01 (Ao Vivo)")
+        self.assertEqual(escolhidos[0].id, "GPwGsv1te5M")
+        self.assertEqual(classificar_clipes(candidatos, musica, 157, "1977")[0].id, "eS7yRwHE0Ow")
+
+    def test_album_define_versao_se_o_nome_da_faixa_nao_a_explicita(self):
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Artista - Brisa (Festival da Serra Unplugged)"),
+            entrada("bbbbbbbbbbb", "Artista - Brisa (Versão de Estúdio)"),
+        ]
+        disco = "Festival da Serra (Acústico ao Vivo)"
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, ("Brisa", "Artista"), 200, disco)],
+                         ["aaaaaaaaaaa"])
+        self.assertEqual([c.id for c in classificar_clipes(
+            candidatos, ("Brisa - Versão de Estúdio", "Artista"), 200, disco)], ["bbbbbbbbbbb"])
+
+    def test_busca_consulta_o_album_se_a_primeira_resposta_traz_outro_show(self):
+        musica = ("Vento do Mar - Ao Vivo", "Artista")
+        chave = (musica, 1)
+        snap = {"musica": musica, "dur": 200, "tocando": True, "reproducao_id": 1,
+                "pedido_capa_album": {"musica": musica, "album": "No Teatro Parte 01 (Ao Vivo)"}}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        respostas = [
+            {"entries": [entrada("aaaaaaaaaaa", "Artista - Vento do Mar (Ao Vivo no Parque)")]},
+            {"entries": [entrada("bbbbbbbbbbb", "Artista - Vento do Mar (No Teatro)")]},
+        ]
+        with patch.object(fonte, "_youtube", side_effect=[json.dumps(r).encode() for r in respostas]) as youtube:
+            self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["bbbbbbbbbbb", "aaaaaaaaaaa"])
+        self.assertEqual([chamada.args[0][-1] for chamada in youtube.call_args_list], [
+            "ytsearch20:Artista Vento do Mar ao vivo", "ytsearch20:Artista Vento do Mar No Teatro"])
+
     def test_preserva_parenteses_no_titulo_e_live_no_nome_da_banda(self):
         candidatos = [
             entrada("aaaaaaaaaaa", "The Rolling Stones - (I Can't Get No) Satisfaction (Official Video)",
@@ -348,6 +406,24 @@ class ModoClipeTest(unittest.TestCase):
             arquivo = fonte._carregar_clipe(snap, chave, Path(pasta))
             self.assertEqual(arquivo.read_text(encoding="utf-8"), "ccccccccccc")
         self.assertEqual(tentativas, ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"])
+
+    def test_reconsulta_uma_vez_apos_falha_temporaria_na_mesma_faixa(self):
+        musica = ("Faixa", "Artista")
+        snap = {"musica": musica, "tocando": True, "reproducao_id": 1}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        relogio = 100
+
+        def esperar(_intervalo):
+            nonlocal relogio
+            relogio += 1
+            if relogio >= 130:
+                fonte._parar.set()
+
+        with patch("modo_clipe.time.monotonic", side_effect=lambda: relogio), \
+             patch.object(fonte._parar, "wait", side_effect=esperar), \
+             patch.object(fonte, "_carregar_clipe", side_effect=RuntimeError("YouTube")) as carregar:
+            fonte._rodar()
+        self.assertEqual(carregar.call_count, 2)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
     def test_detecta_imagem_estatica_antes_de_usar_video_alternativo(self):
