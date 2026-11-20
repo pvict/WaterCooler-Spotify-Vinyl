@@ -17,6 +17,7 @@ MODOS = ("dinamico", "spotify", "video", "clipe")
 LIMITE_SINCRONIA_CLIPE_MS = 3000
 PADRAO = {"modo": "dinamico", "brilho": None, "tela_ligada": True,
           "adiantar_clipe_ms": 0,
+          "letras_ativas": False,
           "video_ocioso": None, "video_ocioso_nome": "", "gaming": False,
           "lotus_ativo": False, "lotus_pasta": None,
           "lotus_modo": "musica", "lotus_cor": [255, 255, 255],
@@ -43,6 +44,8 @@ def validar(dados, anterior=None):
         config["tela_ligada"] = dados["tela_ligada"]
     if type(dados.get("gaming")) is bool:
         config["gaming"] = dados["gaming"]
+    if type(dados.get("letras_ativas")) is bool:
+        config["letras_ativas"] = dados["letras_ativas"]
     if type(dados.get("lotus_ativo")) is bool:
         config["lotus_ativo"] = dados["lotus_ativo"]
     if dados.get("lotus_modo") in ("musica", "manual"):

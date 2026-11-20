@@ -82,6 +82,8 @@ To enable **Clipe**, install [Node.js LTS](https://nodejs.org/) and run `.\.venv
 
 In **Clipe** mode, use **Sincronia** to compensate for a consistent delay between sound and the USB display. Positive values advance the video. The setting is saved across tracks.
 
+Enable **Letras** to show synchronized lyrics on the USB display. In **Spotify** and **Dinâmico**, the album artwork fills the background with a blur and the current line is highlighted. In **Clipe**, the lyrics appear as subtitles over the video. Lyrics come from [LRCLIB](https://lrclib.net/) when a timed match is available. The normal display remains visible when a track has no timed lyrics.
+
 | Control | What it does |
 | --- | --- |
 | **Brilho / Auto** | Adjust screen brightness, or let it follow the time of day. **0%** and the power button turn off the screen. |

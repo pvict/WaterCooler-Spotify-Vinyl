@@ -80,6 +80,8 @@ Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute
 
 No modo **Clipe**, use **Sincronia** para compensar um atraso constante entre o som e a tela USB. Valores positivos adiantam o vídeo. O ajuste fica salvo e vale para todas as faixas.
 
+Ative **Letras** para ver os versos sincronizados na tela USB. Em **Spotify** e **Dinâmico**, a capa ocupa o fundo com desfoque e o verso atual ganha destaque. Em **Clipe**, a letra aparece como legenda sobre o vídeo. A fonte de letras é o [LRCLIB](https://lrclib.net/). Quando não há letra cronometrada para a faixa, a tela mantém a exibição normal.
+
 | Controle | Para que serve |
 | --- | --- |
 | **Brilho / Auto** | Ajusta o brilho da tela ou o define pelo horário. **0%** e o botão de energia apagam a tela. |

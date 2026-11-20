@@ -731,6 +731,9 @@ class Janela(tk.Tk):
         c.itemconfigure(self.modo_dica, anchor="ne")
         self.seletor = Seletor(self, self.config_usuario["modo"], self.mudar_modo, self.f_modo, self.f_pequena)
         c.create_window(44, 441, window=self.seletor, anchor="nw")
+        self.letras_botao = Botao(self, "Letras", self.alternar_letras, largura=120, altura=34)
+        self.letras_item = c.create_window(601, 533, window=self.letras_botao,
+                                          anchor="nw", state="hidden")
         self.sincronia_clipe_botao = Botao(self, "Sincronia", self.ajustar_sincronia_clipe,
                                           largura=200, altura=34,
                                           dica="Ajustar o tempo do clipe na tela USB")
@@ -978,7 +981,7 @@ class Janela(tk.Tk):
             self.canvas.itemconfigure(self.hero_rotulo, fill=SECUNDARIO)
             self.seletor.atualizar_cor(self.cor_modo)
             for botao in (self.auto, self.power, self.iniciar, self.fundo_botao,
-                          self.gaming_botao, self.lotus_botao):
+                          self.gaming_botao, self.lotus_botao, self.letras_botao):
                 botao.atualizar(cor=self.cor_modo)
             for botao in self.midia_botoes.values():
                 botao.atualizar(cor=self.cor_modo)
@@ -1078,6 +1081,7 @@ class Janela(tk.Tk):
         self.seletor.dica.texto = ("Modo retomado ao sair de Gaming." if gaming
                                    else MODOS[self.seletor.indice][2])
         self.canvas.itemconfigure(self.modo_dica, text="")
+        self.atualizar_letras()
         self.atualizar_sincronia_clipe()
         self.slider.atualizar(valor, self.cor_modo)
         if self.lotus_painel is not None and self.lotus_painel.visivel:
@@ -1086,6 +1090,18 @@ class Janela(tk.Tk):
         # As informações iniciais também respeitam o modo salvo na última sessão.
         if hasattr(self, "artista_texto"):
             self.atualizar_texto_midia()
+
+    def atualizar_letras(self):
+        visivel = self.config_usuario["modo"] != "video" and not self.config_usuario["gaming"]
+        self.canvas.itemconfigure(self.letras_item, state="normal" if visivel else "hidden")
+        ativas = self.config_usuario["letras_ativas"]
+        self.letras_botao.atualizar(selecionado=ativas, cor=self.cor_modo,
+                                    dica="Ocultar letras na tela USB" if ativas else "Mostrar letras na tela USB")
+
+    def alternar_letras(self):
+        self.config_usuario["letras_ativas"] = not self.config_usuario["letras_ativas"]
+        self.atualizar_letras()
+        self.guardar()
 
     def atualizar_sincronia_clipe(self):
         visivel = self.config_usuario["modo"] == "clipe" and not self.config_usuario["gaming"]
