@@ -76,6 +76,25 @@ class TestLetrasTela(unittest.TestCase):
         assert self.quadro(100.3) is self.clip_frame
         self.fonte.consultar.assert_called_with(None)
 
+    def test_legenda_antecipa_o_verso_em_meio_segundo_alem_do_avanco_do_video(self):
+        self.config["modo"] = "clipe"
+        self.clipe.posicao_letra.return_value = 1.49
+        assert self.quadro(100) is self.clip_frame
+
+        self.clipe.posicao_letra.return_value = 1.5
+        assert self.quadro(100) is not self.clip_frame
+        assert status_letras_atual(self.config, self.snap) == "exibindo"
+
+    def test_letra_em_tela_cheia_usa_o_mesmo_avanco_em_todos_os_modos(self):
+        self.clipe.quadro.return_value = None
+        for modo in ("spotify", "dinamico", "clipe"):
+            with self.subTest(modo=modo):
+                self.usar_composicao_real()
+                self.config["modo"] = modo
+                with patch.object(self.painel.visual_letras, "spotify", return_value=self.quadro_normal) as render:
+                    self.quadro(100)
+                    render.assert_called_once_with(self.capa, self.letra, 2.0)
+
     def test_clipe_sem_quadro_mostra_letra_ate_o_video_chegar(self):
         self.usar_composicao_real()
         self.config["modo"] = "clipe"

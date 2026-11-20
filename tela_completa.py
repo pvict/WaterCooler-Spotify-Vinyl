@@ -66,6 +66,7 @@ FALHAS_MAX = 10
 ESPERA_RECONEXAO = 5
 KBPS_CLIPE = 2800
 KBPS = 5000               # reduz a fila USB mantendo o alvo de 60 FPS
+ADIANTAMENTO_LETRAS = 0.5  # segundos para compensar a exibição pela tela USB
 PLAYLIST_DURACAO = 5.0
 PLAYLIST_ESPERA_INICIAL = 1.0
 PLAYLIST_ESPERA_FINAL = 0.8
@@ -1179,7 +1180,7 @@ class Painel:
             if quadro is not None:
                 self._publicar_visual(False)
                 if letra is not None:
-                    posicao = self.clipe.posicao_letra(snap, time.monotonic())
+                    posicao = self.clipe.posicao_letra(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
                     legendado = self.visual_letras.clipe(quadro, letra, posicao)
                     estado["status_letras"] = (faixa, modo, "exibindo") if legendado is not quadro else status_letras
                     return legendado
@@ -1273,7 +1274,7 @@ class Painel:
         self.estava_tocando = tocando
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
         if letra is not None:
-            posicao = posicao_atual(snap, time.monotonic())
+            posicao = posicao_atual(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
             # A capa confirmada é da faixa atual. O painel pode ainda mostrar a anterior.
             quadro = self.visual_letras.spotify(snap.get("capa_letras"), letra, posicao)
             estado["status_letras"] = (faixa, modo, "exibindo")
