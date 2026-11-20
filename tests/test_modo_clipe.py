@@ -63,6 +63,56 @@ class ModoClipeTest(unittest.TestCase):
                        "Girl on the Moon (feat. Convidada)", "Girl on the Moon (2025 Remixed)"):
             self.assertEqual(titulo_base(titulo), "Girl on the Moon")
 
+    def test_corte_de_single_admite_clipe_integral_com_creditos_da_banda(self):
+        musica = ('Purple Rain - 7" Single Edit; 2017 Remaster', "Prince")
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Purple Rain (7\" Single Edit) (2017 Remaster)", "Prince", 246),
+            entrada("bbbbbbbbbbb", "Prince - Purple Rain (Official Video)", "The Codfather", 478),
+            entrada("ccccccccccc", "Prince & The Revolution - Purple Rain (Official Video), HD "
+                    "(Digitally Remastered and Upscaled)", "Enhanced Music Videos", 425),
+            entrada("ddddddddddd", "Prince - Purple Rain (Live in Syracuse)", "Prince", 993),
+            entrada("eeeeeeeeeee", "Prince - Purple Rain (Official Video)", "Outro canal", 800),
+            entrada("fffffffffff", "Prince & The Revolution - Purple Rain (Official Music Video)",
+                    "Outro canal", 533),
+        ]
+        self.assertEqual(titulo_base(musica[0]), "Purple Rain")
+        resultados = classificar_clipes(candidatos, musica, 246)
+        self.assertEqual([c.id for c in resultados[:2]], ["ccccccccccc", "bbbbbbbbbbb"])
+        self.assertTrue(all(c.exigir_movimento for c in resultados[:2]))
+        self.assertNotIn("ddddddddddd", [c.id for c in resultados])
+        self.assertNotIn("eeeeeeeeeee", [c.id for c in resultados])
+
+    def test_versao_de_sete_polegadas_encontra_credito_em_qualquer_ordem(self):
+        musica = ('Tom\'s Diner - 7″ Version', "DNA")
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Suzanne Vega, DNA - Tom's Diner", "Suzanne Vega", 228),
+            entrada("bbbbbbbbbbb", "Suzanne Vega featuring D.N.A. - Tom's Diner (Music Video)",
+                    "Canal musical", 228),
+            entrada("ccccccccccc", "Suzanne Vega - Tom's Diner (Acapella Version)",
+                    "Suzanne Vega", 127),
+            entrada("ddddddddddd", "DNA feat. Suzanne Vega - Tom's Diner (Lyrics)",
+                    "Canal musical", 228),
+            entrada("eeeeeeeeeee", "DNA & Suzanne Vega - Tom's Diner Again", "Canal musical", 228),
+        ]
+        self.assertEqual(titulo_base(musica[0]), "Tom's Diner")
+        self.assertEqual({c.id for c in classificar_clipes(candidatos, musica, 228)},
+                         {"aaaaaaaaaaa", "bbbbbbbbbbb"})
+
+    def test_clipe_longo_em_canal_terceiro_exige_imagem_em_movimento(self):
+        musica = ('Faixa - 7" Version', "Artista")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 200}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        candidatos = classificar_clipes([
+            entrada("aaaaaaaaaaa", "Artista - Faixa (Official Video)", "Outro canal", 360),
+        ], musica, 200)
+        with TemporaryDirectory() as pasta, \
+             patch.object(fonte, "_buscar_clipes", return_value=candidatos), \
+             patch.object(fonte, "_baixar_video", return_value=Path(pasta) / "clipe.mp4"), \
+             patch("modo_clipe.video_tem_movimento", return_value=False) as verificar:
+            self.assertIsNone(fonte._carregar_clipe(snap, chave, Path(pasta)))
+            verificar.assert_called_once()
+
     def test_prioriza_original_oficial_sobre_remix_e_outros_canais(self):
         candidatos = [
             entrada("eeeeeeeeeee", "Girl on the Moon", "Foreigner", 230),
