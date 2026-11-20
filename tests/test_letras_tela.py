@@ -85,6 +85,12 @@ class TestLetrasTela(unittest.TestCase):
         assert self.quadro(100) is not self.clip_frame
         assert status_letras_atual(self.config, self.snap) == "exibindo"
 
+    def test_lyric_video_preserva_letras_embutidas_sem_sobrepor_legenda(self):
+        self.config["modo"] = "clipe"
+        self.clipe.letra_no_video = True
+        assert self.quadro(100.2) is self.clip_frame
+        assert status_letras_atual(self.config, self.snap) == "exibindo"
+
     def test_letra_em_tela_cheia_usa_o_mesmo_avanco_em_todos_os_modos(self):
         self.clipe.quadro.return_value = None
         for modo in ("spotify", "dinamico", "clipe"):

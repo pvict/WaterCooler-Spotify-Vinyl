@@ -1179,6 +1179,9 @@ class Painel:
             quadro = self.clipe.quadro(snap, agora)
             if quadro is not None:
                 self._publicar_visual(False)
+                if self.clipe.letra_no_video is True:
+                    estado["status_letras"] = (faixa, modo, "exibindo") if faixa is not None else None
+                    return quadro
                 if letra is not None:
                     posicao = self.clipe.posicao_letra(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
                     legendado = self.visual_letras.clipe(quadro, letra, posicao)

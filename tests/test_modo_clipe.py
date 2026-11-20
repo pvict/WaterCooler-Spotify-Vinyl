@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from controle_interface import validar
-from modo_clipe import (FILTRO_CLIPE, FPS_CLIPE, CandidatoClipe, FonteClipe, QuadrosClipe,
+from modo_clipe import (FILTRO_CLIPE, FILTRO_LYRIC_VIDEO, FPS_CLIPE, CandidatoClipe, FonteClipe, QuadrosClipe,
                         classificar_clipes, posicao_atual, titulo_base, video_tem_movimento)
 
 
@@ -115,6 +115,19 @@ class ModoClipeTest(unittest.TestCase):
                       entrada("bbbbbbbbbbb", "Artista - Coração (Official Lyrics)")]
         self.assertIsNone(escolher_clipe(candidatos, ("Coração", "Artista"), 200))
 
+    def test_lyric_video_ordena_por_visualizacoes_e_filtra_outras_faixas(self):
+        musica = ("Coração", "Artista")
+        candidatos = [
+            dict(entrada("aaaaaaaaaaa", "Artista - Coração (Official Lyric Video)"), view_count=80),
+            dict(entrada("bbbbbbbbbbb", "[Lyrics] Artista - Coração"), view_count=150),
+            dict(entrada("ccccccccccc", "Artista - Coração (Clipe Oficial)"), view_count=800),
+            dict(entrada("ddddddddddd", "Artista - Coração (Karaoke Lyrics)"), view_count=900),
+            dict(entrada("eeeeeeeeeee", "Outro artista - Coração (Letra)", "Outro artista"), view_count=1000),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, musica, 200)], ["ccccccccccc"])
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, musica, 200, lyric_video=True)],
+                         ["bbbbbbbbbbb", "aaaaaaaaaaa"])
+
     def test_titulo_canonico_remove_variacoes_de_edicao(self):
         for titulo in ("Girl on the Moon - 2025 Remix", "Girl on the Moon (2025 Remix)",
                        "Girl on the Moon [Remastered 2025]", "Girl on the Moon – Radio Edit",
@@ -165,7 +178,7 @@ class ModoClipeTest(unittest.TestCase):
             entrada("aaaaaaaaaaa", "Artista - Faixa (Official Video)", "Outro canal", 360),
         ], musica, 200)
         with TemporaryDirectory() as pasta, \
-             patch.object(fonte, "_buscar_clipes", return_value=candidatos), \
+             patch.object(fonte, "_buscar_clipes", side_effect=[candidatos, []]), \
              patch.object(fonte, "_baixar_video", return_value=Path(pasta) / "clipe.mp4"), \
              patch("modo_clipe.video_tem_movimento", return_value=False) as verificar:
             self.assertIsNone(fonte._carregar_clipe(snap, chave, Path(pasta)))
@@ -406,6 +419,38 @@ class ModoClipeTest(unittest.TestCase):
             arquivo = fonte._carregar_clipe(snap, chave, Path(pasta))
             self.assertEqual(arquivo.read_text(encoding="utf-8"), "ccccccccccc")
         self.assertEqual(tentativas, ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"])
+        self.assertFalse(fonte.letra_no_video)
+
+    def test_recorre_a_lyric_video_depois_de_esgotar_os_clipes(self):
+        musica = ("Coração", "Artista")
+        chave = (musica, 1)
+        snap = {"musica": musica, "tocando": True, "reproducao_id": 1, "dur": 200}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        clipe = CandidatoClipe("aaaaaaaaaaa", True)
+        lyric = CandidatoClipe("bbbbbbbbbbb", False)
+        with TemporaryDirectory() as diretorio:
+            pasta = Path(diretorio)
+            arquivo = pasta / "clipe.bbbbbbbbbbb.mp4"
+            with (patch.object(fonte, "_buscar_clipes", side_effect=[[clipe], [lyric]]) as buscar,
+                  patch.object(fonte, "_baixar_video", side_effect=[RuntimeError("YouTube"), arquivo]) as baixar,
+                  patch("modo_clipe.video_tem_movimento", return_value=True)):
+                self.assertEqual(fonte._carregar_clipe(snap, chave, pasta), arquivo)
+        self.assertEqual([chamada.args[0] for chamada in baixar.call_args_list], [clipe.id, lyric.id])
+        self.assertTrue(buscar.call_args.kwargs.get("lyric_video"))
+        self.assertTrue(fonte.letra_no_video)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
+    def test_lyric_video_preserva_bordas_do_video_dentro_do_circulo(self):
+        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+               "-i", "color=blue:s=640x360,drawbox=0:0:100:ih:red:t=fill",
+               "-vf", FILTRO_LYRIC_VIDEO, "-frames:v", "1", "-pix_fmt", "rgb24",
+               "-f", "rawvideo", "-"]
+        quadro = subprocess.check_output(cmd, timeout=10)
+        self.assertEqual(len(quadro), 480 * 480 * 3)
+        i = (240 * 480 + 75) * 3
+        r, _, b = quadro[i:i + 3]
+        self.assertGreater(r, 230)
+        self.assertLess(b, 20)
 
     def test_reconsulta_uma_vez_apos_falha_temporaria_na_mesma_faixa(self):
         musica = ("Faixa", "Artista")

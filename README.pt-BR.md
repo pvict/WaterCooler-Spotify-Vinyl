@@ -80,7 +80,7 @@ Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute
 
 No modo **Clipe**, use **Sincronia** para compensar um atraso constante entre o som e a tela USB. Valores positivos adiantam o vídeo. O ajuste fica salvo e vale para todas as faixas.
 
-O app busca pelo artista e pelo título da faixa no YouTube. Para faixas ao vivo e acústicas, usa o álbum do Spotify para identificar a gravação correspondente quando possível. Dentro do grupo compatível, tenta os vídeos em ordem de visualizações e descarta publicações só de áudio.
+O app busca pelo artista e pelo título da faixa no YouTube. Para faixas ao vivo e acústicas, usa o álbum do Spotify para identificar a gravação correspondente quando possível. Dentro do grupo compatível, tenta os vídeos em ordem de visualizações e descarta publicações só de áudio. Quando não há clipe disponível, tenta os lyric videos compatíveis em ordem de visualizações.
 
 Ative **Letras** para ver os versos sincronizados na tela USB. A visualização em tela cheia usa a capa desfocada, anima a troca de verso e mostra os versos vizinhos em tamanho menor. Em **Clipe**, a letra aparece sobre o vídeo e usa a tela cheia enquanto o vídeo carrega ou está indisponível. O status ao lado de **Letras** informa o andamento da busca e da exibição. O app busca letras cronometradas no [LRCLIB](https://lrclib.net/) e no [LRCMux](https://lrcmux.dev/).
 

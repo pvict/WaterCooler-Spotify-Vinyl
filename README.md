@@ -82,7 +82,7 @@ To enable **Clipe**, install [Node.js LTS](https://nodejs.org/) and run `.\.venv
 
 In **Clipe** mode, use **Sincronia** to compensate for a consistent delay between sound and the USB display. Positive values advance the video. The setting is saved across tracks.
 
-The app searches YouTube by artist and track title. For live and acoustic tracks, it uses the Spotify album to identify the matching performance when possible. It tries videos within the compatible group in order of view count and skips audio-only uploads.
+The app searches YouTube by artist and track title. For live and acoustic tracks, it uses the Spotify album to identify the matching performance when possible. It tries videos within the compatible group in order of view count and skips audio-only uploads. When a music video is unavailable, it tries compatible lyric videos in order of view count.
 
 Enable **Letras** to show synchronized lyrics on the USB display. The full-screen view uses blurred album artwork, animated verse changes, and smaller text for surrounding verses. In **Clipe**, lyrics appear as subtitles when video is available and use the full-screen view while it loads or is unavailable. The status beside **Letras** shows the state of the lookup and display. The app looks for timed lyrics in [LRCLIB](https://lrclib.net/) and [LRCMux](https://lrcmux.dev/).
 
