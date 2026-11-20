@@ -162,19 +162,65 @@ class ModoClipeTest(unittest.TestCase):
         snap["tocando"] = False
         self.assertEqual(posicao_atual(snap, 22), 12)
 
-    def test_descarta_quadro_antigo_apos_troca_ou_seek(self):
+    def test_congela_clipe_ao_avancar_e_troca_direto_para_o_novo_quadro(self):
         musica = ("Título", "Artista")
-        snap = {"musica": musica, "reproducao_id": 10, "tocando": True,
-                "pos": 12, "t_poll": time.monotonic()}
-        imagem = object()
+        chave = (musica, 10)
+        snap = {"musica": musica, "reproducao_id": 10, "tocando": True, "pos": 12, "t_poll": 100}
         fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        original, novo = QuadrosClipe(), QuadrosClipe()
+        imagem, proxima = object(), object()
+        original.adicionar(12, imagem, threading.Event())
+        fonte._fluxo = (chave, original)
+
+        with patch("modo_clipe.time") as relogio:
+            relogio.monotonic.side_effect = [100, 100.05, 100.10, 100.20]
+            self.assertIs(fonte.quadro(snap, 100), imagem)
+            snap.update(pos=27, t_poll=100.05)
+            self.assertIs(fonte.quadro(snap, 100.05), imagem)
+            self.assertTrue(original.reposicionar.is_set())
+            fonte._fluxo = None
+            self.assertIs(fonte.quadro(snap, 100.10), imagem)
+            novo.adicionar(27.15, proxima, threading.Event())
+            fonte._fluxo = (chave, novo)
+            self.assertIs(fonte.quadro(snap, 100.20), proxima)
+
+    def test_congela_ao_voltar_mas_libera_em_trocas_ou_pausas(self):
+        musica = ("Título", "Artista")
+        snap = {"musica": musica, "reproducao_id": 10, "tocando": True, "pos": 12, "t_poll": 100}
+        for termino in (dict(musica=("Outra faixa", "Artista"), reproducao_id=12),
+                        dict(tocando=False), {}):
+            with self.subTest(termino=termino):
+                fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+                quadros = QuadrosClipe()
+                imagem = object()
+                quadros.adicionar(12, imagem, threading.Event())
+                fonte._fluxo = ((musica, 10), quadros)
+                fim = 100.10 if termino else 103
+                with patch("modo_clipe.time") as relogio:
+                    relogio.monotonic.side_effect = [100, 100.05, fim]
+                    self.assertIs(fonte.quadro(snap, 100), imagem)
+                    seek = dict(snap, reproducao_id=11, pos=3, t_poll=100.05)
+                    self.assertIs(fonte.quadro(seek, 100.05), imagem)
+                    fonte._fluxo = None
+                    self.assertIsNone(fonte.quadro(dict(seek, **termino), fim))
+
+    def test_corrige_desvio_persistente_em_um_quadro_por_vez(self):
         quadros = QuadrosClipe()
-        quadros.adicionar(12, imagem, threading.Event())
-        fonte._fluxo = ((musica, 10), quadros)
-        self.assertIs(fonte.quadro(snap, 100), imagem)
-        self.assertIsNone(fonte.quadro(dict(snap, reproducao_id=11), 100))
-        self.assertIsNone(fonte.quadro(dict(snap, pos=50), 100))
-        self.assertIsNone(fonte.quadro(dict(snap, tocando=False), 100))
+        self.assertAlmostEqual(quadros._posicao_alvo(60, 100), 60)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.45, 100.2), 60.2)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.7, 100.45), 60.45)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.85, 100.6), 60.6 + 1 / FPS_CLIPE)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.95, 100.7), 60.7 + 1 / FPS_CLIPE)
+        self.assertAlmostEqual(quadros._posicao_alvo(61.15, 100.9), 60.9 + 2 / FPS_CLIPE)
+
+    def test_oscilacoes_breves_nao_mudam_a_cadencia(self):
+        quadros = QuadrosClipe()
+        self.assertAlmostEqual(quadros._posicao_alvo(60, 100), 60)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.4, 100.2), 60.2)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.35, 100.35), 60.35)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.66, 100.5), 60.5)
+        self.assertAlmostEqual(quadros._posicao_alvo(60.75, 100.75), 60.75)
+        self.assertAlmostEqual(quadros._posicao_alvo(75, 100.8), 75)
 
     def test_avanca_um_quadro_por_tick_apos_atraso_do_usb(self):
         quadros = QuadrosClipe()

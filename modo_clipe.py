@@ -28,6 +28,11 @@ FILTRO_CLIPE = (
 )
 INTERVALO = 0.10
 TOLERANCIA = 1.0
+DESVIO_SUAVE = 0.12
+CONFIRMAR_DESVIO = 0.35
+INTERVALO_CORRECAO = 0.25
+DESVIO_PRIMEIRO_QUADRO = 0.20
+ESPERA_REPOSICIONAR = 1.8
 ID_VIDEO = re.compile(r"[A-Za-z0-9_-]{11}")
 ARRANJOS = ("ao vivo", "live", "acustico", "acoustic", "unplugged")
 IGNORAR = ("lyrics", "lyric", "letra", "karaoke", "cover", "reaction", "reacao",
@@ -159,6 +164,18 @@ def posicao_atual(snap, agora):
     return max(0.0, snap.get("pos", 0.0) + extra)
 
 
+def amostra_posicao(snap):
+    return snap.get("pos", 0.0), snap.get("t_poll", 0.0)
+
+
+def mudou_posicao(anterior, atual):
+    posicao, instante = atual
+    posicao_anterior, instante_anterior = anterior
+    # Cada estimativa interpolada entre amostras tem o mesmo t_poll.
+    return (instante > instante_anterior
+            and abs(posicao - posicao_anterior - (instante - instante_anterior)) > TOLERANCIA)
+
+
 def chave_reproducao(snap):
     if snap.get("tocando") and snap.get("musica") and all(snap["musica"]):
         return (snap["musica"], snap.get("reproducao_id"))
@@ -186,6 +203,10 @@ class QuadrosClipe:
     def __init__(self):
         self._fila = queue.Queue(maxsize=FILA_QUADROS)
         self._atual = self._proximo = self._offset = None
+        self._direcao_desvio = 0
+        self._proxima_correcao = 0.0
+        self.ajustes_suaves = 0
+        self.reposicionar = threading.Event()
         self.posicao_apresentada = None
         self.fim_leitura = threading.Event()
         self.esgotado = threading.Event()
@@ -198,10 +219,26 @@ class QuadrosClipe:
             except queue.Full:
                 pass
 
+    def _posicao_alvo(self, posicao_spotify, agora):
+        offset = posicao_spotify - agora
+        desvio = offset - self._offset if self._offset is not None else 0.0
+        if self._offset is None or abs(desvio) > TOLERANCIA:
+            self._offset = offset
+            self._direcao_desvio = 0
+        else:
+            # Oscilações curtas do relógio do Windows e da fila USB não mudam a cadência.
+            direcao = 0 if abs(desvio) < DESVIO_SUAVE else (1 if desvio > 0 else -1)
+            if direcao != self._direcao_desvio:
+                self._direcao_desvio = direcao
+                self._proxima_correcao = agora + CONFIRMAR_DESVIO
+            elif direcao and agora >= self._proxima_correcao:
+                self._offset += direcao / FPS_CLIPE
+                self._proxima_correcao = agora + INTERVALO_CORRECAO
+                self.ajustes_suaves += 1
+        return agora + self._offset
+
     def quadro(self, posicao_spotify, agora):
-        if self._offset is None or abs(agora + self._offset - posicao_spotify) > TOLERANCIA:
-            self._offset = posicao_spotify - agora
-        alvo = agora + self._offset
+        alvo = self._posicao_alvo(posicao_spotify, agora)
         for _ in range(FILA_QUADROS + 1):
             if self._proximo is None:
                 try:
@@ -217,7 +254,8 @@ class QuadrosClipe:
             self.esgotado.set()
             return None
 
-        if self._atual is not None and abs(self._atual[0] - posicao_spotify) <= TOLERANCIA:
+        tolerancia = DESVIO_PRIMEIRO_QUADRO if self.posicao_apresentada is None else TOLERANCIA
+        if self._atual is not None and abs(self._atual[0] - posicao_spotify) <= tolerancia:
             self.posicao_apresentada = self._atual[0]
             return self._atual[1]
 
@@ -230,6 +268,9 @@ class FonteClipe:
         self._parar = threading.Event()
         self._thread = threading.Thread(target=self._rodar, name="ModoClipe", daemon=True)
         self._fluxo = None
+        self._ultimo_quadro = None
+        self._ultima_posicao = None
+        self._congelado_ate = 0.0
         self._status = ""
         self._busca = {}
 
@@ -241,9 +282,39 @@ class FonteClipe:
         self._thread.join(timeout=3)
 
     def quadro(self, snap, agora):
+        chave = chave_reproducao(snap)
+        if chave is None:
+            self._ultimo_quadro = self._ultima_posicao = None
+            self._congelado_ate = 0.0
+            return
+        instante = time.monotonic()
+        posicao = posicao_atual(snap, instante)
+        amostra = amostra_posicao(snap)
+        anterior = self._ultima_posicao
+        self._ultima_posicao = chave, amostra
         fluxo = self._fluxo
-        if fluxo is not None and fluxo[0] == chave_reproducao(snap):
-            return fluxo[1].quadro(posicao_atual(snap, time.monotonic()), agora)
+        ultimo = self._ultimo_quadro
+        if anterior is None or anterior[0][0] != chave[0]:
+            ultimo = self._ultimo_quadro = None
+            self._congelado_ate = 0.0
+        elif ultimo is not None:
+            chave_anterior, amostra_anterior = anterior
+            if chave != chave_anterior or mudou_posicao(amostra_anterior, amostra):
+                self._congelado_ate = instante + ESPERA_REPOSICIONAR
+                if fluxo is not None and fluxo[1] is ultimo[0]:
+                    fluxo[1].reposicionar.set()
+
+        if fluxo is not None and fluxo[0] == chave:
+            quadros = fluxo[1]
+            if not quadros.reposicionar.is_set():
+                imagem = quadros.quadro(posicao, agora)
+                if imagem is not None:
+                    self._ultimo_quadro = quadros, imagem
+                    self._congelado_ate = 0.0
+                    return imagem
+        if ultimo is not None and instante < self._congelado_ate:
+            return ultimo[1]
+        self._ultimo_quadro = None
 
     def _chave(self, snap=None):
         if not self._parar.is_set() and self.ativo():
@@ -353,10 +424,9 @@ class FonteClipe:
 
     def _reproduzir(self, arquivo, chave):
         """Retorna True em um salto que exige reabrir o fluxo na nova posição."""
-        agora = time.monotonic()
-        pos = posicao_atual(self.ler_estado(), agora)
-        anterior = (pos, agora)
-        inicio = round(pos, 3)
+        snap = self.ler_estado()
+        anterior = amostra_posicao(snap)
+        inicio = round(posicao_atual(snap, time.monotonic()), 3)
         args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", str(inicio), "-i", str(arquivo),
                 "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", FILTRO_CLIPE,
@@ -373,10 +443,12 @@ class FonteClipe:
                 prazo_quadro = time.monotonic() + 12
                 while self._chave() == chave and not quadros.esgotado.is_set():
                     agora = time.monotonic()
-                    pos = posicao_atual(self.ler_estado(), agora)
-                    if abs(pos - anterior[0] - (agora - anterior[1])) > TOLERANCIA:
+                    snap = self.ler_estado()
+                    amostra = amostra_posicao(snap)
+                    if quadros.reposicionar.is_set() or mudou_posicao(anterior, amostra):
                         return True
-                    anterior = (pos, agora)
+                    anterior = amostra
+                    pos = posicao_atual(snap, agora)
                     apresentado = quadros.posicao_apresentada
                     if apresentado is not None and abs(apresentado - pos) < TOLERANCIA:
                         if self._status:
@@ -385,13 +457,15 @@ class FonteClipe:
                         prazo_quadro = agora + 8
                     if agora >= prazo_quadro:
                         break
-                    self._parar.wait(INTERVALO)
+                    quadros.reposicionar.wait(INTERVALO)
             finally:
                 self._fluxo = None
                 cancelar.set()
                 if proc.poll() is None:
                     proc.kill()
                 leitor.join(timeout=2)
+                if quadros.ajustes_suaves:
+                    self.log(f"clipe: ajustes graduais de sincronia={quadros.ajustes_suaves}")
         return False
 
     def _rodar(self):
