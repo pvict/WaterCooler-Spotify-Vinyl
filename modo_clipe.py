@@ -17,7 +17,7 @@ import unicodedata
 from PIL import Image
 
 from ao_vivo import BYTES_QUADRO, LADO, SEM_JANELA
-from sincronia_audio_clipe import DESVIO_APLICAR, AjustePorAudio, edicao_medida, trecho_da_edicao
+from sincronia_audio_clipe import DESVIO_APLICAR, AjustePorAudio, trecho_da_edicao
 
 
 FPS_CLIPE = 30
@@ -144,6 +144,43 @@ def classificar_clipes(entradas, musica, duracao):
     return [c for _, c in sorted(candidatos)]
 
 
+def referencias_de_audio(entradas, musica, duracao, video):
+    titulo, artista = musica
+    faixa = normalizar(titulo)
+    nomes = {normalizar(artista), normalizar(re.split(r"[,;]", artista, maxsplit=1)[0])}
+    nomes |= {normalizar(re.sub(r"\s+and\s+|&", " ", artista, flags=re.I)),
+              normalizar(artista.replace("&", " and "))}
+    prefixos = sorted(filter(None, nomes), key=len, reverse=True)
+    candidatos = {}
+    for entrada in entradas:
+        if not isinstance(entrada, dict):
+            continue
+        id_audio = entrada.get("id") or ""
+        if not ID_VIDEO.fullmatch(id_audio) or id_audio == video:
+            continue
+        canal = normalizar(entrada.get("channel") or entrada.get("uploader") or "")
+        catalogo = canal.endswith(" topic") and canal.removesuffix(" topic") in nomes
+        if not catalogo and (canal not in nomes or entrada.get("channel_is_verified") is not True):
+            continue
+        nome = normalizar(entrada.get("title") or "")
+        if nome != faixa:
+            nome = next((nome.removeprefix(a + " ") for a in prefixos if nome.startswith(a + " ")), nome)
+        nome = re.sub(r"\s+(?:official audio|audio oficial)$", "", nome)
+        if nome != faixa and nome not in (f"{faixa} single version", f"{faixa} album version"):
+            continue
+        segundos = entrada.get("duration") or 0
+        if not segundos or abs(segundos - duracao) > max(8, min(12, duracao * 0.04)):
+            continue
+        candidatos[id_audio] = (nome != faixa, not catalogo, abs(segundos - duracao))
+    return sorted(candidatos, key=candidatos.__getitem__)
+
+
+def identidade_audio(snap):
+    musica = snap.get("musica")
+    album = snap.get("pedido_capa_album") or {}
+    return musica, album.get("album") if album.get("musica") == musica else None
+
+
 def video_tem_movimento(arquivo):
     lado = 48
     pixels = lado * lado
@@ -265,8 +302,9 @@ class QuadrosClipe:
 class FonteClipe:
     """Busca e decodifica fora da thread que renderiza a tela."""
 
-    def __init__(self, ler_estado, ativo, publicar, log):
+    def __init__(self, ler_estado, ativo, publicar, log, ler_adiantamento_ms=lambda: 0):
         self.ler_estado, self.ativo, self.publicar, self.log = ler_estado, ativo, publicar, log
+        self.ler_adiantamento_ms = ler_adiantamento_ms
         self._parar = threading.Event()
         self._thread = threading.Thread(target=self._rodar, name="ModoClipe", daemon=True)
         self._fluxo = None
@@ -291,7 +329,7 @@ class FonteClipe:
             self._congelado_ate = 0.0
             return
         instante = time.monotonic()
-        posicao = posicao_atual(snap, instante)
+        posicao = self._posicao_tela(snap, instante)
         amostra = amostra_posicao(snap)
         anterior = self._ultima_posicao
         self._ultima_posicao = chave, amostra
@@ -312,7 +350,8 @@ class FonteClipe:
             edicao = edicao_ativa[1]
             if trecho_da_edicao(edicao, posicao) is None:
                 proximo = next((t for t in edicao if t.inicio > posicao), None)
-                if ultimo is not None and posicao >= edicao[0].fim and proximo is not None:
+                if (ultimo is not None and posicao >= edicao[0].fim and proximo is not None
+                        and proximo.inicio - posicao <= 8):
                     # Durante o trecho suprimido pelo clipe, segura o último quadro compatível.
                     self._congelado_ate = instante + (proximo.inicio - posicao) + ESPERA_REPOSICIONAR
                     return ultimo[1]
@@ -349,7 +388,7 @@ class FonteClipe:
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               creationflags=SEM_JANELA) as proc:
             try:
-                while self._chave() == chave and (ativo is None or ativo()):
+                while (chave is None or self._chave() == chave) and (ativo is None or ativo()):
                     if time.monotonic() >= limite:
                         raise RuntimeError("O YouTube demorou para responder.")
                     try:
@@ -415,6 +454,42 @@ class FonteClipe:
                           chave, timeout=20, ativo=ativo)
             return next(pasta.glob("audio.*"), None)
 
+    def _baixar_referencia(self, arquivo, pasta, ativo):
+        snap = self.ler_estado()
+        musica, album = identidade_audio(snap)
+        duracao = snap.get("dur") or 0
+        if not musica or not duracao or not ativo():
+            return
+        titulo, artista = musica
+        video = arquivo.stem.removeprefix("clipe.")
+        entradas = []
+        for consulta in dict.fromkeys((
+                " ".join(filter(None, (artista, titulo, album, "official audio"))),
+                f"{artista} {titulo}")):
+            try:
+                busca = ["--flat-playlist", "--dump-single-json", "--", f"ytsearch18:{consulta}"]
+                saida = self._youtube(busca, None, timeout=9, ativo=ativo)
+            except RuntimeError:
+                continue
+            if not saida or not ativo():
+                return
+            entradas.extend(json.loads(saida).get("entries") or [])
+        for id_audio in referencias_de_audio(entradas, musica, duracao, video)[:4]:
+            try:
+                args = ["--no-playlist", "--no-part", "--max-filesize", "12M",
+                        "--match-filters", "description ^= 'Provided to YouTube by'",
+                        "-f", "ba[protocol=https]", "-o", str(pasta / f"referencia.{id_audio}.%(ext)s"),
+                        "--", f"https://www.youtube.com/watch?v={id_audio}"]
+                saida = self._youtube(args, None, timeout=12, ativo=ativo)
+            except RuntimeError:
+                continue
+            if not ativo():
+                return
+            if saida is not None:
+                audio = next(pasta.glob(f"referencia.{id_audio}.*"), None)
+                if audio:
+                    return audio
+
     def _carregar_clipe(self, snap, chave, pasta):
         candidatos = self._buscar_clipes(snap, chave)
         if not candidatos:
@@ -454,33 +529,45 @@ class FonteClipe:
         posicao, amostra_em = amostra_posicao(self.ler_estado())
         return max(0.0, posicao + instante - amostra_em) if amostra_em else posicao
 
-    def _reproduzir(self, arquivo, chave, ajuste_audio=None, edicao=()):
+    def _posicao_tela(self, snap, agora):
+        return max(0.0, posicao_atual(snap, agora) + self.ler_adiantamento_ms() / 1000)
+
+    def _reproduzir(self, arquivo, chave, ajuste_audio, audio):
         """Retorna True quando o fluxo deve ser reaberto em outra posição."""
         snap = self.ler_estado()
         anterior = amostra_posicao(snap)
-        pos = posicao_atual(snap, time.monotonic())
+        adiantamento = self.ler_adiantamento_ms()
+        pos = self._posicao_tela(snap, time.monotonic())
+        edicao = ajuste_audio.edicao
+        self._edicao_ativa = (chave, edicao) if edicao else None
         trecho = trecho_da_edicao(edicao, pos)
         if edicao and trecho is None:
-            while self._chave() == chave:
-                if trecho_da_edicao(edicao, posicao_atual(self.ler_estado(), time.monotonic())):
+            while self._chave() == chave and identidade_audio(self.ler_estado()) == audio:
+                agora = time.monotonic()
+                pos = self._posicao_tela(self.ler_estado(), agora)
+                if ajuste_audio.edicao is not edicao or trecho_da_edicao(edicao, pos):
                     return True
+                ajuste_audio.solicitar(agora, lambda: self._chave() == chave
+                                        and identidade_audio(self.ler_estado()) == audio,
+                                        self._posicao_no_instante)
                 self._parar.wait(INTERVALO)
             return False
-        deslocamento = ajuste_audio.deslocamento if ajuste_audio is not None else 0.0
-        if trecho is not None:
-            deslocamento = trecho.deslocamento
-            self.log(f"clipe: usando edição medida, deslocamento {deslocamento:+.2f}s")
-        inicio = max(0.0, round(pos + deslocamento, 3))
+        deslocamento = ajuste_audio.deslocamento
+        inicio = max(0.0, round(trecho.posicao_video(pos) if trecho else pos + deslocamento, 3))
+        origem = trecho.posicao_faixa(inicio) if trecho else inicio - deslocamento
+        filtro = FILTRO_CLIPE
+        if trecho is not None and trecho.taxa != 1.0:
+            filtro = f"setpts=PTS/{trecho.taxa:.8f},{filtro}"
         args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", str(inicio), "-i", str(arquivo),
-                "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", FILTRO_CLIPE,
+                "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filtro,
                 "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
         cancelar = threading.Event()
         quadros = QuadrosClipe()
         with subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, creationflags=SEM_JANELA) as proc:
             leitor = threading.Thread(target=self._ler_quadros,
-                                      args=(proc, inicio - deslocamento, quadros, cancelar), daemon=True)
+                                      args=(proc, origem, quadros, cancelar), daemon=True)
             leitor.start()
             self._fluxo = chave, quadros
             try:
@@ -488,31 +575,30 @@ class FonteClipe:
                 while self._chave() == chave:
                     agora = time.monotonic()
                     snap = self.ler_estado()
+                    if identidade_audio(snap) != audio:
+                        break
                     amostra = amostra_posicao(snap)
                     if quadros.reposicionar.is_set() or mudou_posicao(anterior, amostra):
                         return True
                     anterior = amostra
-                    pos = posicao_atual(snap, agora)
-                    if trecho is not None and trecho_da_edicao(edicao, pos) != trecho:
+                    pos = self._posicao_tela(snap, agora)
+                    if (self.ler_adiantamento_ms() != adiantamento or ajuste_audio.edicao is not edicao
+                            or trecho is not None and trecho_da_edicao(edicao, pos) != trecho
+                            or not edicao and abs(ajuste_audio.deslocamento - deslocamento) >= DESVIO_APLICAR):
                         quadros.ajuste_audio_em = agora
                         quadros.reposicionar.set()
                         return True
-                    if ajuste_audio is not None:
-                        if abs(ajuste_audio.deslocamento - deslocamento) >= DESVIO_APLICAR:
-                            quadros.ajuste_audio_em = agora
-                            quadros.reposicionar.set()
-                            return True
-                        ajuste_audio.solicitar(
-                            agora, lambda: not cancelar.is_set() and self._chave() == chave,
-                            self._posicao_no_instante)
+                    ajuste_audio.solicitar(
+                        agora, lambda: not cancelar.is_set() and self._chave() == chave
+                        and identidade_audio(self.ler_estado()) == audio,
+                        self._posicao_no_instante)
                     apresentado = quadros.posicao_apresentada
                     if apresentado is not None and abs(apresentado - pos) < TOLERANCIA:
                         if self._status:
                             self.log("clipe: quadros prontos para a tela USB")
                             self._mensagem("")
                         prazo_quadro = agora + 8
-                    if (quadros.esgotado.is_set() or agora >= prazo_quadro) and (
-                            ajuste_audio is None or not ajuste_audio.calibrando):
+                    if (quadros.esgotado.is_set() or agora >= prazo_quadro) and not ajuste_audio.preparando:
                         break
                     quadros.reposicionar.wait(INTERVALO)
             finally:
@@ -526,26 +612,30 @@ class FonteClipe:
         return False
 
     def _rodar(self):
-        tentado = fim = None
+        tentado = fim = ultimo_adiantamento = None
         musica_salva = arquivo = ajuste_audio = None
         with TemporaryDirectory(prefix="turing-vinyl-clipe-") as diretorio:
             pasta = Path(diretorio)
             while not self._parar.is_set():
                 snap = self.ler_estado()
                 chave = self._chave(snap)
+                audio = identidade_audio(snap)
+                adiantamento = self.ler_adiantamento_ms()
                 if chave is None:
                     tentado = fim = None
+                    self._edicao_ativa = None
                     self._mensagem("")
                     if not self.ativo() and arquivo is not None:
                         ajuste_audio.aguardar()
                         arquivo.unlink(missing_ok=True)
                         musica_salva = arquivo = ajuste_audio = None
-                elif (chave != tentado or
-                      fim is not None and posicao_atual(snap, time.monotonic()) < fim - TOLERANCIA):
-                    tentado, fim = chave, None
+                elif ((chave, audio) != tentado or
+                      fim is not None and (adiantamento != ultimo_adiantamento
+                                           or posicao_atual(snap, time.monotonic()) < fim - TOLERANCIA)):
+                    tentado, fim = (chave, audio), None
                     self._mensagem("Buscando clipe no YouTube…")
                     try:
-                        if musica_salva != chave[0]:
+                        if musica_salva != audio:
                             if ajuste_audio is not None:
                                 ajuste_audio.aguardar()
                             for anterior in pasta.glob("clipe.*"):
@@ -553,18 +643,21 @@ class FonteClipe:
                             musica_salva = arquivo = ajuste_audio = None
                             arquivo = self._carregar_clipe(snap, chave, pasta)
                             if arquivo:
-                                musica_salva = chave[0]
+                                musica_salva = audio
                                 ajuste_audio = AjustePorAudio(
                                     arquivo, self.log,
                                     lambda pasta, ativo, arquivo=arquivo:
-                                    self._baixar_audio_do_clipe(arquivo, pasta, ativo))
+                                    self._baixar_audio_do_clipe(arquivo, pasta, ativo),
+                                    lambda pasta, ativo, arquivo=arquivo:
+                                    self._baixar_referencia(arquivo, pasta, ativo),
+                                    lambda audio=audio: self._chave() is not None
+                                    and identidade_audio(self.ler_estado()) == audio)
                         if arquivo:
-                            edicao = edicao_medida(arquivo, self.ler_estado())
-                            self._edicao_ativa = (chave, edicao) if edicao else None
-                            ajuste = None if edicao else ajuste_audio
-                            while self._chave() == chave and self._reproduzir(arquivo, chave, ajuste, edicao):
+                            while (self._chave() == chave and identidade_audio(self.ler_estado()) == audio
+                                   and self._reproduzir(arquivo, chave, ajuste_audio, audio)):
                                 pass
                             fim = posicao_atual(self.ler_estado(), time.monotonic())
+                            ultimo_adiantamento = self.ler_adiantamento_ms()
                         if self._chave() == chave:
                             self._mensagem("Clipe indisponível · mostrando o vinil")
                     except (OSError, ValueError, RuntimeError) as exc:

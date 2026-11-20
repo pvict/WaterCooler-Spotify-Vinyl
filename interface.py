@@ -16,7 +16,7 @@ import time
 import tkinter as tk
 from collections import deque
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
@@ -25,7 +25,7 @@ from controles_spotify import ControlesSpotify
 from fundo_usuario import ConversorFundo
 from leds_lotus import pasta_valida
 from painel_lotus import PainelLotus
-from controle_interface import (PREFIXO, brilho_horario, carregar, salvar,
+from controle_interface import (LIMITE_SINCRONIA_CLIPE_MS, PREFIXO, brilho_horario, carregar, salvar,
                                 reservar_execucao, liberar_execucao)
 from estilo_interface import (CanvasSuave, FonteInterface, Dica, configurar_dpi,
                                superficie, icone, limitar_linhas, texto_suave,
@@ -731,6 +731,11 @@ class Janela(tk.Tk):
         c.itemconfigure(self.modo_dica, anchor="ne")
         self.seletor = Seletor(self, self.config_usuario["modo"], self.mudar_modo, self.f_modo, self.f_pequena)
         c.create_window(44, 441, window=self.seletor, anchor="nw")
+        self.sincronia_clipe_botao = Botao(self, "Sincronia", self.ajustar_sincronia_clipe,
+                                          largura=200, altura=34,
+                                          dica="Ajustar o tempo do clipe na tela USB")
+        self.sincronia_clipe_item = c.create_window(733, 533, window=self.sincronia_clipe_botao,
+                                                    anchor="nw", state="hidden")
 
         self.texto(64, 569, "Brilho", self.f_sans)
         self.valor_texto = self.texto(712, 569, "", self.f_valor)
@@ -1073,6 +1078,7 @@ class Janela(tk.Tk):
         self.seletor.dica.texto = ("Modo retomado ao sair de Gaming." if gaming
                                    else MODOS[self.seletor.indice][2])
         self.canvas.itemconfigure(self.modo_dica, text="")
+        self.atualizar_sincronia_clipe()
         self.slider.atualizar(valor, self.cor_modo)
         if self.lotus_painel is not None and self.lotus_painel.visivel:
             self.lotus_painel.atualizar()
@@ -1080,6 +1086,26 @@ class Janela(tk.Tk):
         # As informações iniciais também respeitam o modo salvo na última sessão.
         if hasattr(self, "artista_texto"):
             self.atualizar_texto_midia()
+
+    def atualizar_sincronia_clipe(self):
+        visivel = self.config_usuario["modo"] == "clipe" and not self.config_usuario["gaming"]
+        self.canvas.itemconfigure(self.sincronia_clipe_item, state="normal" if visivel else "hidden")
+        valor = self.config_usuario["adiantar_clipe_ms"]
+        rotulo = f"{valor:+d} ms" if valor else "0 ms"
+        self.sincronia_clipe_botao.atualizar(texto=f"Sincronia  {rotulo}", cor=self.cor_modo)
+
+    def ajustar_sincronia_clipe(self):
+        atual = self.config_usuario["adiantar_clipe_ms"]
+        self.sincronia_clipe_botao.dica.fechar()
+        valor = simpledialog.askinteger(
+            "Sincronia do clipe",
+            "Ajuste em milissegundos.\nPositivo adianta o clipe. Negativo atrasa.\n1000 ms equivalem a 1 segundo.",
+            parent=self, initialvalue=atual,
+            minvalue=-LIMITE_SINCRONIA_CLIPE_MS, maxvalue=LIMITE_SINCRONIA_CLIPE_MS)
+        if valor is not None and valor != atual:
+            self.config_usuario["adiantar_clipe_ms"] = valor
+            self.atualizar_sincronia_clipe()
+            self.guardar()
 
     def guardar(self):
         try:

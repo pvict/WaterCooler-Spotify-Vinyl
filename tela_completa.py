@@ -1645,7 +1645,8 @@ def main():
                       lambda: (not parar.is_set() and estado.get("tela_conectada")
                                and controles.modo_efetivo() == "clipe"
                                and controles.config["tela_ligada"]),
-                      lambda texto: estado.update(status_clipe=texto), log)
+                      lambda texto: estado.update(status_clipe=texto), log,
+                      ler_adiantamento_ms=lambda: controles.config["adiantar_clipe_ms"])
     clipe.iniciar()
     t = threading.Thread(target=transmitir, args=(gaming, clipe), daemon=True)
     t.start()
