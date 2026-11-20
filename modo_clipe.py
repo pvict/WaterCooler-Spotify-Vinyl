@@ -17,7 +17,7 @@ import unicodedata
 from PIL import Image
 
 from ao_vivo import BYTES_QUADRO, LADO, SEM_JANELA
-from sincronia_audio_clipe import DESVIO_APLICAR, AjustePorAudio
+from sincronia_audio_clipe import DESVIO_APLICAR, AjustePorAudio, edicao_medida, trecho_da_edicao
 
 
 FPS_CLIPE = 30
@@ -270,6 +270,7 @@ class FonteClipe:
         self._parar = threading.Event()
         self._thread = threading.Thread(target=self._rodar, name="ModoClipe", daemon=True)
         self._fluxo = None
+        self._edicao_ativa = None
         self._ultimo_quadro = None
         self._ultima_posicao = None
         self._congelado_ate = 0.0
@@ -305,6 +306,18 @@ class FonteClipe:
                 self._congelado_ate = instante + ESPERA_REPOSICIONAR
                 if fluxo is not None and fluxo[1] is ultimo[0]:
                     fluxo[1].reposicionar.set()
+
+        edicao_ativa = self._edicao_ativa
+        if edicao_ativa and edicao_ativa[0] == chave:
+            edicao = edicao_ativa[1]
+            if trecho_da_edicao(edicao, posicao) is None:
+                proximo = next((t for t in edicao if t.inicio > posicao), None)
+                if ultimo is not None and posicao >= edicao[0].fim and proximo is not None:
+                    # Durante o trecho suprimido pelo clipe, segura o último quadro compatível.
+                    self._congelado_ate = instante + (proximo.inicio - posicao) + ESPERA_REPOSICIONAR
+                    return ultimo[1]
+                self._ultimo_quadro = None
+                return
 
         if fluxo is not None and fluxo[0] == chave:
             quadros = fluxo[1]
@@ -441,12 +454,23 @@ class FonteClipe:
         posicao, amostra_em = amostra_posicao(self.ler_estado())
         return max(0.0, posicao + instante - amostra_em) if amostra_em else posicao
 
-    def _reproduzir(self, arquivo, chave, ajuste_audio=None):
-        """Retorna True em um salto que exige reabrir o fluxo na nova posição."""
+    def _reproduzir(self, arquivo, chave, ajuste_audio=None, edicao=()):
+        """Retorna True quando o fluxo deve ser reaberto em outra posição."""
         snap = self.ler_estado()
         anterior = amostra_posicao(snap)
+        pos = posicao_atual(snap, time.monotonic())
+        trecho = trecho_da_edicao(edicao, pos)
+        if edicao and trecho is None:
+            while self._chave() == chave:
+                if trecho_da_edicao(edicao, posicao_atual(self.ler_estado(), time.monotonic())):
+                    return True
+                self._parar.wait(INTERVALO)
+            return False
         deslocamento = ajuste_audio.deslocamento if ajuste_audio is not None else 0.0
-        inicio = max(0.0, round(posicao_atual(snap, time.monotonic()) + deslocamento, 3))
+        if trecho is not None:
+            deslocamento = trecho.deslocamento
+            self.log(f"clipe: usando edição medida, deslocamento {deslocamento:+.2f}s")
+        inicio = max(0.0, round(pos + deslocamento, 3))
         args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", str(inicio), "-i", str(arquivo),
                 "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", FILTRO_CLIPE,
@@ -468,6 +492,11 @@ class FonteClipe:
                     if quadros.reposicionar.is_set() or mudou_posicao(anterior, amostra):
                         return True
                     anterior = amostra
+                    pos = posicao_atual(snap, agora)
+                    if trecho is not None and trecho_da_edicao(edicao, pos) != trecho:
+                        quadros.ajuste_audio_em = agora
+                        quadros.reposicionar.set()
+                        return True
                     if ajuste_audio is not None:
                         if abs(ajuste_audio.deslocamento - deslocamento) >= DESVIO_APLICAR:
                             quadros.ajuste_audio_em = agora
@@ -476,7 +505,6 @@ class FonteClipe:
                         ajuste_audio.solicitar(
                             agora, lambda: not cancelar.is_set() and self._chave() == chave,
                             self._posicao_no_instante)
-                    pos = posicao_atual(snap, agora)
                     apresentado = quadros.posicao_apresentada
                     if apresentado is not None and abs(apresentado - pos) < TOLERANCIA:
                         if self._status:
@@ -531,7 +559,10 @@ class FonteClipe:
                                     lambda pasta, ativo, arquivo=arquivo:
                                     self._baixar_audio_do_clipe(arquivo, pasta, ativo))
                         if arquivo:
-                            while self._chave() == chave and self._reproduzir(arquivo, chave, ajuste_audio):
+                            edicao = edicao_medida(arquivo, self.ler_estado())
+                            self._edicao_ativa = (chave, edicao) if edicao else None
+                            ajuste = None if edicao else ajuste_audio
+                            while self._chave() == chave and self._reproduzir(arquivo, chave, ajuste, edicao):
                                 pass
                             fim = posicao_atual(self.ler_estado(), time.monotonic())
                         if self._chave() == chave:

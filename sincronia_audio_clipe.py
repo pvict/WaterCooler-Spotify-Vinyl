@@ -8,6 +8,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
+from typing import NamedTuple
 
 from ao_vivo import SEM_JANELA
 
@@ -19,6 +20,37 @@ INTERVALO_EDICAO = 13
 DESVIO_APLICAR = 0.18
 MARGEM_BUSCA = 60
 CAPTURA = Path(__file__).with_name("captura_spotify.py")
+
+
+class TrechoEdicao(NamedTuple):
+    inicio: float
+    fim: float
+    deslocamento: float
+
+
+# Comparação do clipe oficial com No Angel e com amostras do Spotify.
+# Entre os trechos abaixo, a edição do clipe omite áudio presente no álbum.
+_EDICOES_MEDIDAS = {
+    ("clipe.1TO48Cnl66w", ("Thank You", "Dido"), "No Angel"): (
+        212.36,
+        (TrechoEdicao(17.40, 125.56, -17.40),
+         TrechoEdicao(131.56, math.inf, -23.40)),
+    ),
+}
+
+
+def edicao_medida(arquivo, snap):
+    musica = snap.get("musica")
+    album = snap.get("pedido_capa_album") or {}
+    if album.get("musica") == musica:
+        edicao = _EDICOES_MEDIDAS.get((arquivo.stem, musica, album.get("album")))
+        if edicao is not None and abs((snap.get("dur") or 0) - edicao[0]) < 0.5:
+            return edicao[1]
+    return ()
+
+
+def trecho_da_edicao(edicao, posicao):
+    return next((trecho for trecho in edicao if trecho.inicio <= posicao < trecho.fim), None)
 
 
 def localizar_audio(amostra, clipe, posicao_spotify):
