@@ -1,8 +1,11 @@
+import shutil
+import subprocess
+import threading
 import time
 import unittest
 
 from controle_interface import validar
-from modo_clipe import FonteClipe, escolher_clipe, posicao_atual
+from modo_clipe import FILTRO_CLIPE, FPS_CLIPE, FonteClipe, QuadrosClipe, escolher_clipe, posicao_atual
 
 
 def entrada(id, titulo, canal="Artista", duracao=200):
@@ -57,11 +60,49 @@ class ModoClipeTest(unittest.TestCase):
                 "pos": 12, "t_poll": time.monotonic()}
         imagem = object()
         fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
-        fonte._ultimo_quadro = ((musica, 10), 12, imagem)
-        self.assertIs(fonte.quadro(snap), imagem)
-        self.assertIsNone(fonte.quadro(dict(snap, reproducao_id=11)))
-        self.assertIsNone(fonte.quadro(dict(snap, pos=50)))
-        self.assertIsNone(fonte.quadro(dict(snap, tocando=False)))
+        quadros = QuadrosClipe()
+        quadros.adicionar(12, imagem, threading.Event())
+        fonte._fluxo = ((musica, 10), quadros)
+        self.assertIs(fonte.quadro(snap, 100), imagem)
+        self.assertIsNone(fonte.quadro(dict(snap, reproducao_id=11), 100))
+        self.assertIsNone(fonte.quadro(dict(snap, pos=50), 100))
+        self.assertIsNone(fonte.quadro(dict(snap, tocando=False), 100))
+
+    def test_avanca_um_quadro_por_tick_apos_atraso_do_usb(self):
+        quadros = QuadrosClipe()
+        cancelar = threading.Event()
+        for i in range(6):
+            quadros.adicionar(60 + i / FPS_CLIPE, i, cancelar)
+        self.assertEqual(quadros.quadro(60, 100), 0)
+        self.assertEqual(quadros.quadro(60.20, 100 + 1 / FPS_CLIPE), 1)
+        self.assertEqual(quadros.quadro(60.21, 100 + 2 / FPS_CLIPE), 2)
+        self.assertEqual(quadros.quadro(60.22, 100 + 3 / FPS_CLIPE), 3)
+
+    def test_consumir_ultimos_quadros_antes_de_voltar_ao_vinil(self):
+        quadros = QuadrosClipe()
+        quadros.adicionar(60, "primeiro", threading.Event())
+        quadros.adicionar(60 + 1 / FPS_CLIPE, "último", threading.Event())
+        quadros.fim_leitura.set()
+        self.assertEqual(quadros.quadro(60, 100), "primeiro")
+        self.assertEqual(quadros.quadro(60 + 1 / FPS_CLIPE, 100 + 1 / FPS_CLIPE), "último")
+        self.assertIsNone(quadros.quadro(60.1, 100.1))
+        self.assertTrue(quadros.esgotado.is_set())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
+    def test_ffmpeg_recorta_paisagem_e_retrato_sem_barras(self):
+        for w, h in [(640, 360), (360, 640)]:
+            barras = ("drawbox=0:0:100:ih:red:t=fill,drawbox=iw-100:0:100:ih:red:t=fill"
+                      if w > h else "drawbox=0:0:iw:100:red:t=fill,drawbox=0:ih-100:iw:100:red:t=fill")
+            proc = subprocess.run(
+                ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                 f"color=blue:s={w}x{h}:r=30,{barras}", "-vf", FILTRO_CLIPE, "-frames:v", "1",
+                 "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+                capture_output=True, check=True, timeout=10)
+            self.assertEqual(len(proc.stdout), 480 * 480 * 3)
+            for i in (0, (480 * 240 + 240) * 3, len(proc.stdout) - 3):
+                r, g, b = proc.stdout[i:i + 3]
+                self.assertLess(max(r, g), 5)
+                self.assertGreater(b, 230)
 
 
 if __name__ == "__main__":

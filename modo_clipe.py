@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import queue
 import re
 import shutil
 import subprocess
@@ -17,7 +18,13 @@ from PIL import Image
 from ao_vivo import BYTES_QUADRO, LADO, SEM_JANELA
 
 
-FPS_CLIPE = 24
+FPS_CLIPE = 30
+FILA_QUADROS = 8
+FILTRO_CLIPE = (
+    f"fps={FPS_CLIPE},"
+    f"scale='ceil(max(1,dar)*{LADO}/2)*2':'ceil(max(1,1/dar)*{LADO}/2)*2',"
+    f"crop={LADO}:{LADO},setsar=1"
+)
 INTERVALO = 0.10
 TOLERANCIA = 1.0
 ID_VIDEO = re.compile(r"[A-Za-z0-9_-]{11}")
@@ -107,6 +114,48 @@ def comando_youtube():
     return base
 
 
+class QuadrosClipe:
+    """Fila curta entre o decodificador e o relógio do vídeo H.264."""
+
+    def __init__(self):
+        self._fila = queue.Queue(maxsize=FILA_QUADROS)
+        self._atual = self._proximo = self._offset = None
+        self.posicao_apresentada = None
+        self.fim_leitura = threading.Event()
+        self.esgotado = threading.Event()
+
+    def adicionar(self, posicao, imagem, cancelar):
+        while not cancelar.is_set():
+            try:
+                self._fila.put((posicao, imagem), timeout=INTERVALO)
+                return
+            except queue.Full:
+                pass
+
+    def quadro(self, posicao_spotify, agora):
+        if self._offset is None or abs(agora + self._offset - posicao_spotify) > TOLERANCIA:
+            self._offset = posicao_spotify - agora
+        alvo = agora + self._offset
+        for _ in range(FILA_QUADROS + 1):
+            if self._proximo is None:
+                try:
+                    self._proximo = self._fila.get_nowait()
+                except queue.Empty:
+                    break
+            if self._proximo[0] > alvo + 0.5 / FPS_CLIPE:
+                break
+            self._atual, self._proximo = self._proximo, None
+
+        if (self.fim_leitura.is_set() and self._proximo is None and self._fila.empty()
+                and (self._atual is None or alvo - self._atual[0] >= 1 / FPS_CLIPE)):
+            self.esgotado.set()
+            return None
+
+        if self._atual is not None and abs(self._atual[0] - posicao_spotify) <= TOLERANCIA:
+            self.posicao_apresentada = self._atual[0]
+            return self._atual[1]
+
+
 class FonteClipe:
     """Busca e decodifica fora da thread que renderiza a tela."""
 
@@ -114,7 +163,7 @@ class FonteClipe:
         self.ler_estado, self.ativo, self.publicar, self.log = ler_estado, ativo, publicar, log
         self._parar = threading.Event()
         self._thread = threading.Thread(target=self._rodar, name="ModoClipe", daemon=True)
-        self._ultimo_quadro = None
+        self._fluxo = None
         self._status = ""
         self._busca = {}
 
@@ -125,11 +174,10 @@ class FonteClipe:
         self._parar.set()
         self._thread.join(timeout=3)
 
-    def quadro(self, snap):
-        atual = self._ultimo_quadro
-        if (atual is not None and atual[0] == chave_reproducao(snap)
-                and abs(atual[1] - posicao_atual(snap, time.monotonic())) <= TOLERANCIA):
-            return atual[2]
+    def quadro(self, snap, agora):
+        fluxo = self._fluxo
+        if fluxo is not None and fluxo[0] == chave_reproducao(snap):
+            return fluxo[1].quadro(posicao_atual(snap, time.monotonic()), agora)
 
     def _chave(self, snap=None):
         if not self._parar.is_set() and self.ativo():
@@ -186,23 +234,18 @@ class FonteClipe:
         for parcial in pasta.glob("clipe.*"):
             parcial.unlink()
 
-    def _ler_quadros(self, proc, inicio, chave, cancelar):
+    def _ler_quadros(self, proc, inicio, quadros, cancelar):
         indice = 0
-        while not cancelar.is_set():
-            dados = proc.stdout.read(BYTES_QUADRO)
-            if len(dados) != BYTES_QUADRO:
-                return
-            pos = inicio + indice / FPS_CLIPE
-            indice += 1
+        try:
             while not cancelar.is_set():
-                alvo = posicao_atual(self.ler_estado(), time.monotonic())
-                diferenca = pos - alvo
-                if diferenca <= 0.025:
-                    if diferenca >= -0.35:
-                        img = Image.frombytes("RGB", (LADO, LADO), dados)
-                        self._ultimo_quadro = chave, pos, img
-                    break
-                cancelar.wait(min(diferenca, INTERVALO))
+                dados = proc.stdout.read(BYTES_QUADRO)
+                if len(dados) != BYTES_QUADRO:
+                    return
+                imagem = Image.frombytes("RGB", (LADO, LADO), dados)
+                quadros.adicionar(inicio + indice / FPS_CLIPE, imagem, cancelar)
+                indice += 1
+        finally:
+            quadros.fim_leitura.set()
 
     def _reproduzir(self, arquivo, chave):
         """Retorna True em um salto que exige reabrir o fluxo na nova posição."""
@@ -210,28 +253,28 @@ class FonteClipe:
         pos = posicao_atual(self.ler_estado(), agora)
         anterior = (pos, agora)
         inicio = round(pos, 3)
-        filtro = ("scale=416:234:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                  f"setsar=1,pad={LADO}:{LADO}:(ow-iw)/2:(oh-ih)/2,fps={FPS_CLIPE}")
         args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", str(inicio), "-i", str(arquivo),
-                "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filtro,
+                "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", FILTRO_CLIPE,
                 "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
         cancelar = threading.Event()
+        quadros = QuadrosClipe()
         with subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, creationflags=SEM_JANELA) as proc:
             leitor = threading.Thread(target=self._ler_quadros,
-                                      args=(proc, inicio, chave, cancelar), daemon=True)
+                                      args=(proc, inicio, quadros, cancelar), daemon=True)
             leitor.start()
+            self._fluxo = chave, quadros
             try:
                 prazo_quadro = time.monotonic() + 12
-                while self._chave() == chave and leitor.is_alive():
+                while self._chave() == chave and not quadros.esgotado.is_set():
                     agora = time.monotonic()
                     pos = posicao_atual(self.ler_estado(), agora)
                     if abs(pos - anterior[0] - (agora - anterior[1])) > TOLERANCIA:
                         return True
                     anterior = (pos, agora)
-                    quadro = self._ultimo_quadro
-                    if quadro is not None and abs(quadro[1] - pos) < TOLERANCIA:
+                    apresentado = quadros.posicao_apresentada
+                    if apresentado is not None and abs(apresentado - pos) < TOLERANCIA:
                         if self._status:
                             self.log("clipe: quadros prontos para a tela USB")
                             self._mensagem("")
@@ -240,11 +283,11 @@ class FonteClipe:
                         break
                     self._parar.wait(INTERVALO)
             finally:
+                self._fluxo = None
                 cancelar.set()
                 if proc.poll() is None:
                     proc.kill()
                 leitor.join(timeout=2)
-                self._ultimo_quadro = None
         return False
 
     def _rodar(self):

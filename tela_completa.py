@@ -35,7 +35,7 @@ import animacao_capa
 from spotify_playlist import SpotifyPlaylistWatcher
 from controle_interface import Controles, iniciar_ponte, reservar_execucao, liberar_execucao
 from fundo_usuario import FundoOcioso
-from modo_clipe import FonteClipe
+from modo_clipe import FPS_CLIPE, FonteClipe
 from modo_gaming import PreparadorGaming, PipelinePreparado, FPS_GAMING
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -62,6 +62,7 @@ TAM_CAPA = 240
 ESCONDER_PAUSADO = True
 FALHAS_MAX = 10
 ESPERA_RECONEXAO = 5
+KBPS_CLIPE = 2800
 KBPS = 5000               # reduz a fila USB mantendo o alvo de 60 FPS
 PLAYLIST_DURACAO = 5.0
 PROXIMA_ANTECEDENCIA = 22.0
@@ -1122,7 +1123,7 @@ class Painel:
         snap = dict(estado)
         modo = controles.config["modo"]
         if modo == "clipe" and self.clipe is not None:
-            quadro = self.clipe.quadro(snap)
+            quadro = self.clipe.quadro(snap, agora)
             if quadro is not None:
                 self._publicar_visual(False)
                 return quadro
@@ -1249,7 +1250,9 @@ def sessao_usb(gaming, clipe):
         while not parar.is_set():
             arquivo_gaming = gaming.destino()
             economico = arquivo_gaming is not None
-            fps_atual = FPS_GAMING if economico else FPS
+            modo_clipe = not economico and controles.config["modo"] == "clipe"
+            fps_atual = FPS_GAMING if economico else (FPS_CLIPE if modo_clipe else FPS)
+            kbps_atual = KBPS_CLIPE if modo_clipe else KBPS
             with silenciar_saida():
                 # Reinicia o decodificador da tela entre dois fluxos H.264 completos.
                 # A thread do envio anterior já foi encerrada antes de chegar aqui.
@@ -1275,9 +1278,9 @@ def sessao_usb(gaming, clipe):
                 log(f"tela conectada - brilho inicial: {brilho}%")
                 primeira = False
             log("Gaming: vídeo preparado a 30 FPS, sem renderização ou codificação ao vivo"
-                if economico else f"tela: fluxo normal a {FPS} FPS")
+                if economico else f"tela: fluxo {'Clipe' if modo_clipe else 'normal'} a {fps_atual} FPS")
 
-            # Cada fluxo tem seu evento; trocar Gaming não encerra os demais serviços.
+            # Cada fluxo tem seu evento para trocar o perfil da tela durante o uso.
             parar_sessao = threading.Event()
             fundo_musica = fundo_ocioso = pipe = ponte_thread = None
             try:
@@ -1285,23 +1288,24 @@ def sessao_usb(gaming, clipe):
                     pipe = PipelinePreparado(dev, arquivo_gaming, parar_sessao, log)
                 else:
                     fundo_musica = ao_vivo.FundoDecoder(
-                        ARQUIVO_MUSICA, FPS, log=log, nome="fundo da música")
+                        ARQUIVO_MUSICA, fps_atual, log=log, nome="fundo da música")
                     if controles.interface:
                         fundo_ocioso = FundoOcioso(controles, ao_vivo.FundoDecoder,
-                                                   ARQUIVO_BACKGROUND, FPS, estado, log)
+                                                   ARQUIVO_BACKGROUND, fps_atual, estado, log)
                     else:
                         fundo_ocioso = ao_vivo.FundoDecoder(
-                            ARQUIVO_BACKGROUND, FPS, log=log, nome="fundo ocioso")
+                            ARQUIVO_BACKGROUND, fps_atual, log=log, nome="fundo ocioso")
                     painel = Painel(fundo_musica, fundo_ocioso, brilho, clipe)
                     pipe = ao_vivo.PipelineAoVivo(
-                        dev, painel.quadro, fps=FPS, kbps=KBPS, parar=parar_sessao, log=log)
+                        dev, painel.quadro, fps=fps_atual, kbps=kbps_atual, parar=parar_sessao, log=log)
                     painel.pipe = pipe
                     pipe.contexto = painel.contexto_diagnostico
 
                 def ponte():
                     ultimo_brilho = brilho
                     while not parar_sessao.is_set():
-                        if parar.is_set() or gaming.destino() != arquivo_gaming:
+                        perfil_clipe = not economico and controles.config["modo"] == "clipe"
+                        if parar.is_set() or gaming.destino() != arquivo_gaming or perfil_clipe != modo_clipe:
                             parar_sessao.set()
                             return
                         if economico:
