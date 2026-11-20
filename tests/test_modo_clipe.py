@@ -137,6 +137,66 @@ class ModoClipeTest(unittest.TestCase):
         self.assertEqual([c.id for c in classificar_clipes(candidatos, ("Stay", "Artista"), 200)],
                          ["ccccccccccc"])
 
+    def test_encontra_o_video_do_artista_quando_o_titulo_so_acrescenta_mencoes(self):
+        musica = ("Resenha da Muierada", "Muierada")
+        candidatos = [
+            entrada("GM2AZpYP5HQ", "Resenha da Muierada", "MUIERADA", 247),
+            entrada("DwCmZYjrDoA", "Resenha da Muierada, @JulyaeMaryana @juliarafaela_ "
+                    "@KamilaeKavicOficial", "MUIERADA", 248),
+            entrada("aaaaaaaaaaa", "Resenha da Muierada @Artista (Lyric Video)", "MUIERADA", 248),
+            entrada("bbbbbbbbbbb", "Resenha da Muierada 2 @Artista", "MUIERADA", 248),
+            entrada("ccccccccccc", "Resenha da Muierada @Muierada", "Outro canal", 248),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, musica, 247)],
+                         ["DwCmZYjrDoA", "GM2AZpYP5HQ"])
+
+    def test_aceita_mencoes_depois_de_creditos_mas_preserva_o_nome_inteiro(self):
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Artista - A Faixa feat. @Canal-Oficial (Videoclipe Oficial)"),
+            entrada("bbbbbbbbbbb", "Artista - A Faixa @Canal-Oficial Versão Alternativa"),
+            entrada("ccccccccccc", "Artista - A Faixa © @Convidada"),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, ("A Faixa", "Artista"), 200)],
+                         ["aaaaaaaaaaa", "ccccccccccc"])
+        self.assertEqual(escolher_clipe(candidatos, ("A Faixa @Canal-Oficial Versão Alternativa", "Artista"),
+                                       200), "bbbbbbbbbbb")
+
+    def test_busca_aproveita_canal_quando_a_primeira_resposta_veio_sem_creditos(self):
+        musica = ("A Faixa", "Artista")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 200}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        video = entrada("aaaaaaaaaaa", "A Faixa, @Convidada", None)
+        respostas = [{"entries": [video]}, {"entries": [dict(video, channel="Artista")]}]
+        with patch.object(fonte, "_youtube", side_effect=[json.dumps(r).encode() for r in respostas]):
+            self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa"])
+
+    def test_confirma_canal_quando_buscas_so_retornam_titulo_e_identificador(self):
+        musica = ("A Faixa", "Artista")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 200}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        incompleto = entrada("aaaaaaaaaaa", "A Faixa, @Convidada", None)
+        busca = {"entries": [incompleto, entrada("bbbbbbbbbbb", "Outra Faixa", None)]}
+        with patch.object(fonte, "_youtube", side_effect=[json.dumps(r).encode() for r in
+                         (busca, busca, dict(incompleto, channel="Artista"))]) as youtube:
+            self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa"])
+        args = youtube.call_args.args[0]
+        self.assertIn("--skip-download", args)
+        self.assertEqual(args[-1], "https://www.youtube.com/watch?v=aaaaaaaaaaa")
+
+    def test_resultado_de_catalogo_nao_impede_confirmacao_de_clipe_sem_canal(self):
+        musica = ("A Faixa", "Artista")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 200}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        clipe = entrada("aaaaaaaaaaa", "A Faixa, @Convidada", None)
+        busca = {"entries": [entrada("bbbbbbbbbbb", "A Faixa"), clipe]}
+        meta = dict(clipe, channel="Artista")
+        with patch.object(fonte, "_youtube", side_effect=[json.dumps(r).encode() for r in
+                         (busca, busca, meta)]):
+            self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa", "bbbbbbbbbbb"])
+
     def test_distingue_artista_topic_de_canal_automatico(self):
         candidatos = [
             entrada("aaaaaaaaaaa", "Topic - Breaking Me (Official Video)", "Topic"),

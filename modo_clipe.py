@@ -58,6 +58,8 @@ ROTULOS_FINAIS = re.compile(
 MARCADOR_REMIX = re.compile(r"\bre ?mix(?:ed)?\b")
 ROTULOS_VIDEO = re.compile(
     r"\s+(?:" + "|".join(sorted(OFICIAL + MARCADOR_VIDEO, key=len, reverse=True)) + r")$")
+MENCOES_TITULO = re.compile(
+    r"(?<!\w)(?:(?:feat(?:uring)?|ft|part|participaç[aã]o de)\.?\s+)?@[\w.-]+", re.I)
 
 
 def normalizar(texto):
@@ -82,6 +84,16 @@ def normalizar_artista(nome):
 def contem_artista(creditos, artistas):
     return (normalizar_artista(creditos) in artistas or
             any(normalizar_artista(nome) in artistas for nome in SEPARAR_CREDITOS.split(creditos)))
+
+
+def extras_do_titulo(titulo, faixa, prefixo):
+    sem_mencoes = MENCOES_TITULO.sub("", titulo)
+    for variante in dict.fromkeys((sem_mencoes, titulo)):
+        sem_rotulos = ROTULOS_FINAIS.sub("", variante)
+        titulos = {normalizar(titulo_base(t)).removeprefix(prefixo) for t in (variante, sem_rotulos)}
+        if faixa in titulos or any(ROTULOS_VIDEO.sub("", t) == faixa for t in titulos):
+            return normalizar(variante).removeprefix(prefixo).removeprefix(faixa)
+    return None
 
 
 class CandidatoClipe(NamedTuple):
@@ -111,7 +123,6 @@ def classificar_clipes(entradas, musica, duracao):
         video = entrada.get("id") or ""
         if not ID_VIDEO.fullmatch(video) or video in vistos:
             continue
-        vistos.add(video)
         titulo_video = entrada.get("title") or ""
         canal = normalizar_artista(entrada.get("channel") or entrada.get("uploader") or "")
         canal_artista = any(canal in (a, f"{a} official", f"{a} oficial",
@@ -131,14 +142,10 @@ def classificar_clipes(entradas, musica, duracao):
             if not prefixo and not canal_artista:
                 continue
 
-        nome = normalizar(faixa_video).removeprefix(prefixo)
-        sem_rotulos = ROTULOS_FINAIS.sub("", faixa_video)
-        titulos = {normalizar(titulo_base(t)).removeprefix(prefixo) for t in (faixa_video, sem_rotulos)}
-        titulos.update(ROTULOS_VIDEO.sub("", t) for t in tuple(titulos))
-        if faixa not in titulos:
+        extras = extras_do_titulo(faixa_video, faixa, prefixo)
+        if extras is None:
             continue
 
-        extras = nome.removeprefix(faixa)
         if (any(contem(extras, palavra) for palavra in IGNORAR)
                 or {a for a in ARRANJOS if contem(extras, a)} != arranjos):
             continue
@@ -162,6 +169,7 @@ def classificar_clipes(entradas, musica, duracao):
         prioridade = (not oficial, remix, fora_da_margem, so_titulo_no_canal, not fonte_conhecida,
                       not tem_rotulo, diferenca, ordem)
         candidatos.append((prioridade, CandidatoClipe(video, oficial, fora_da_margem)))
+        vistos.add(video)
     return [c for _, c in sorted(candidatos)]
 
 
@@ -435,26 +443,51 @@ class FonteClipe:
             consulta = " ".join([artista, faixa, *arranjos])
             entradas = []
             candidatos = []
+            falha = None
             for texto in (f"{consulta} official music video", consulta):
                 try:
                     saida = self._youtube(["--flat-playlist", "--dump-single-json", "--",
                                            f"ytsearch12:{texto}"], chave)
-                except RuntimeError:
-                    if candidatos:
-                        break
-                    raise
+                except RuntimeError as exc:
+                    falha = exc
+                    continue
                 if saida is None:
                     return []
                 entradas.extend(json.loads(saida).get("entries") or [])
                 candidatos = classificar_clipes(entradas, musica, duracao)
                 if candidatos and candidatos[0].oficial and not candidatos[0].exigir_movimento:
                     break
+            if not candidatos or not candidatos[0].oficial:
+                confirmada = self._confirmar_canal(entradas, candidatos, musica, duracao, chave)
+                if confirmada:
+                    candidatos = classificar_clipes([*entradas, confirmada], musica, duracao)
+            if falha is not None and not entradas:
+                raise falha
             if candidatos:
                 if len(self._busca) >= 64:
                     self._busca.pop(next(iter(self._busca)))
                 self._busca[musica] = candidatos
             return candidatos
         return self._busca[musica]
+
+    def _confirmar_canal(self, entradas, candidatos, musica, duracao, chave):
+        resultados = [e for e in entradas if isinstance(e, dict)]
+        conhecidos = {c.id for c in candidatos}
+        conhecidos.update(e.get("id") for e in resultados if e.get("channel") or e.get("uploader"))
+        incompletas = [dict(e, channel=musica[1]) for e in resultados if e.get("id") not in conhecidos]
+        # Só consulta páginas com título compatível. O canal usado acima serve apenas para essa triagem.
+        for candidato in classificar_clipes(incompletas, musica, duracao)[:2]:
+            args = ["--no-playlist", "--skip-download", "--dump-single-json", "--",
+                    f"https://www.youtube.com/watch?v={candidato.id}"]
+            try:
+                saida = self._youtube(args, chave, timeout=5)
+            except RuntimeError:
+                continue
+            if saida is None:
+                break
+            entrada = json.loads(saida)
+            if entrada.get("id") == candidato.id and classificar_clipes([entrada], musica, duracao):
+                return entrada
 
     def _baixar_video(self, video, pasta, chave, timeout):
         saida = self._youtube(["--no-playlist", "--no-part", "--max-filesize", "45M",
