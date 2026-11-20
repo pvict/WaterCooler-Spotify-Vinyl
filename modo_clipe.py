@@ -11,6 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
+from typing import NamedTuple
 import unicodedata
 
 from PIL import Image
@@ -28,17 +29,23 @@ FILTRO_CLIPE = (
 INTERVALO = 0.10
 TOLERANCIA = 1.0
 ID_VIDEO = re.compile(r"[A-Za-z0-9_-]{11}")
-VERSOES = ("ao vivo", "live", "acustico", "acoustic", "remix")
+ARRANJOS = ("ao vivo", "live", "acustico", "acoustic", "unplugged")
 IGNORAR = ("lyrics", "lyric", "letra", "karaoke", "cover", "reaction", "reacao",
-           "fan made", "unofficial", "nao oficial", "visualizer", "audio", "speed up",
-           "sped up", "slowed", "instrumental", "traducao")
+           "audio", "speed up", "sped up", "slowed", "instrumental", "traducao",
+           "interview", "entrevista", "commentary", "tutorial")
 OFICIAL = ("official music video", "official video", "official hd video",
            "official 4k video", "clipe oficial", "video oficial", "videoclipe oficial",
-           "official mv", "music video", "videoclipe", "video musical", "m v")
+           "official mv", "clip officiel", "video musical oficial")
+MARCADOR_VIDEO = ("music video", "videoclipe", "video musical", "visualizer", "m v")
 SUFIXO_SPOTIFY = re.compile(
-    r"\s+(?:[-–—]\s+|[\[(])(?=(?:\d{4}\s+)?(?:remaster|radio edit|single version|"
-    r"album version|original mix|ao vivo|live\b|ac[uú]stic|acoustic|remix|feat\b))", re.I)
-ROTULOS_FINAIS = re.compile(r"(?:\s*[\[(][^\])]*[\])])+\s*$")
+    r"\s+(?:[-–—]\s+|[\[(])(?=(?:\d{4}\s+)?(?:remaster\w*|re-?mix(?:ed)?\b|radio (?:edit|mix)|"
+    r"single version|album version|original mix|anniversary|ao vivo|live\b|ac[uú]stic|"
+    r"acoustic|unplugged|feat\b))", re.I)
+ROTULOS_FINAIS = re.compile(
+    r"(?:\s+(?:hd|hq|uhd|4k|8k|(?:19|20)\d{2})\b|\s*[\[({][^\])}]*[\])}])+\s*$", re.I)
+MARCADOR_REMIX = re.compile(r"\bre ?mix(?:ed)?\b")
+ROTULOS_VIDEO = re.compile(
+    r"\s+(?:" + "|".join(sorted(OFICIAL + MARCADOR_VIDEO, key=len, reverse=True)) + r")$")
 
 
 def normalizar(texto):
@@ -55,37 +62,96 @@ def titulo_base(titulo):
     return SUFIXO_SPOTIFY.split(titulo, maxsplit=1)[0].strip()
 
 
-def escolher_clipe(entradas, musica, duracao):
+class CandidatoClipe(NamedTuple):
+    id: str
+    oficial: bool
+
+
+def classificar_clipes(entradas, musica, duracao):
     titulo, artista = musica
-    faixa = normalizar(titulo_base(titulo))
-    artista_principal = normalizar(re.split(r"\s*[,;]\s*|\s+feat\.?\s+", artista,
-                                          maxsplit=1, flags=re.I)[0])
-    titulo_completo = normalizar(titulo)
-    versoes = {v for v in VERSOES if contem(titulo_completo, v)}
+    base = titulo_base(titulo)
+    faixa = normalizar(base)
+    subtitulo = normalizar(titulo.removeprefix(base))
+    arranjos = {a for a in ARRANJOS if contem(subtitulo, a)}
+    artistas = tuple(dict.fromkeys(filter(None, (
+        normalizar(artista), normalizar(re.split(r"\s*[,;]\s*|\s+feat\.?\s+", artista,
+                                               maxsplit=1, flags=re.I)[0])))))
+    if not faixa or not artistas:
+        return []
+
     candidatos = []
-    for indice, entrada in enumerate(entradas):
-        if not isinstance(entrada, dict) or not ID_VIDEO.fullmatch(entrada.get("id") or ""):
+    vistos = set()
+    for ordem, entrada in enumerate(entradas):
+        if not isinstance(entrada, dict):
             continue
+        video = entrada.get("id") or ""
+        if not ID_VIDEO.fullmatch(video) or video in vistos:
+            continue
+        vistos.add(video)
         titulo_video = entrada.get("title") or ""
-        partes = re.split(r"\s+[-–—]\s+", titulo_video, maxsplit=1)
-        faixa_video = (partes[1] if len(partes) == 2 and contem(normalizar(partes[0]), artista_principal)
-                       else titulo_video)
-        nome = normalizar(faixa_video)
         canal = normalizar(entrada.get("channel") or entrada.get("uploader") or "")
-        oficial = any(contem(nome, palavra) for palavra in OFICIAL)
-        diferenca = abs((entrada.get("duration") or 0) - duracao) if duracao else 0
-        if (not contem(nome, faixa) or not artista_principal
-                or not (contem(normalizar(titulo_video), artista_principal) or contem(canal, artista_principal))
-                or any(contem(nome, palavra) and not contem(titulo_completo, palavra)
-                       for palavra in IGNORAR)
-                or {v for v in VERSOES if contem(nome, v)} != versoes
-                or contem(canal, "topic")
-                or not oficial
-                or duracao and diferenca > max(20, duracao * 0.2)):
+        canal_artista = any(canal in (a, f"{a} official", f"{a} oficial",
+                                     f"{a} vevo", f"{a.replace(' ', '')}vevo") for a in artistas)
+        if canal.endswith(" topic") and not canal_artista:
             continue
-        titulo_sem_rotulos = normalizar(titulo_base(ROTULOS_FINAIS.sub("", faixa_video)))
-        candidatos.append((titulo_sem_rotulos != faixa, diferenca, indice, entrada["id"]))
-    return min(candidatos)[-1] if candidatos else None
+
+        partes = re.split(r"\s+[-–—]\s+|:\s+", titulo_video, maxsplit=1)
+        if len(partes) == 2 and normalizar(partes[0]) in artistas:
+            faixa_video, prefixo = partes[1], ""
+        elif len(partes) == 2 and normalizar(partes[1]) in artistas:
+            faixa_video, prefixo = partes[0], ""
+        else:
+            faixa_video = titulo_video
+            nome_completo = normalizar(titulo_video)
+            prefixo = next((a + " " for a in artistas if nome_completo.startswith(a + " ")), "")
+            if not prefixo and not canal_artista:
+                continue
+
+        nome = normalizar(faixa_video).removeprefix(prefixo)
+        sem_rotulos = ROTULOS_FINAIS.sub("", faixa_video)
+        titulos = {normalizar(titulo_base(t)).removeprefix(prefixo) for t in (faixa_video, sem_rotulos)}
+        titulos.update(ROTULOS_VIDEO.sub("", t) for t in tuple(titulos))
+        if faixa not in titulos:
+            continue
+
+        extras = nome.removeprefix(faixa)
+        if (any(contem(extras, palavra) for palavra in IGNORAR)
+                or {a for a in ARRANJOS if contem(extras, a)} != arranjos):
+            continue
+        remix = MARCADOR_REMIX.search(extras) is not None
+        if remix and not MARCADOR_REMIX.search(subtitulo):
+            continue
+        oficial = (any(contem(extras, t) for t in OFICIAL)
+                   and not any(contem(extras, t) for t in ("unofficial", "nao oficial", "fan made")))
+        tem_rotulo = any(contem(extras, t) for t in MARCADOR_VIDEO)
+        segundos = entrada.get("duration") or 0
+        diferenca = abs(segundos - duracao) if segundos and duracao else 0
+        margem = max(45, duracao * 0.3) if oficial else max(20, duracao * 0.2)
+        if segundos and duracao and diferenca > margem:
+            continue
+        fonte_conhecida = canal_artista or (oficial and entrada.get("channel_is_verified") is True)
+        # Em canais de artista, uploads com só o título frequentemente são áudio do catálogo.
+        so_titulo_no_canal = not oficial and canal_artista and normalizar(titulo_video) == faixa
+        prioridade = (not oficial, remix, so_titulo_no_canal, not fonte_conhecida,
+                      not tem_rotulo, diferenca, ordem)
+        candidatos.append((prioridade, CandidatoClipe(video, oficial)))
+    return [c for _, c in sorted(candidatos)]
+
+
+def video_tem_movimento(arquivo):
+    lado = 48
+    pixels = lado * lado
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-ss", "3", "-i", str(arquivo),
+           "-t", "26", "-map", "0:v:0", "-an", "-vf", f"fps=1/2,scale={lado}:{lado}",
+           "-pix_fmt", "gray", "-f", "rawvideo", "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=True, timeout=6, creationflags=SEM_JANELA)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    imagens = [proc.stdout[i:i + pixels] for i in range(0, len(proc.stdout), pixels)]
+    mudancas = sum(sum(abs(x - y) for x, y in zip(a, b)) >= 4 * pixels
+                   for a, b in zip(imagens, imagens[1:]))
+    return mudancas >= 2
 
 
 def posicao_atual(snap, agora):
@@ -209,30 +275,68 @@ class FonteClipe:
                     proc.kill()
                     proc.communicate()
 
-    def _buscar_video(self, snap, chave):
+    def _buscar_clipes(self, snap, chave):
         musica = chave[0]
+        duracao = snap.get("dur") or 0
         if musica not in self._busca:
-            faixa = musica[0] if any(contem(normalizar(musica[0]), v) for v in VERSOES) else titulo_base(musica[0])
-            consulta = f"{musica[1]} {faixa} official music video"
-            saida = self._youtube(["--flat-playlist", "--dump-single-json", "--",
-                                   f"ytsearch8:{consulta}"], chave)
-            if saida is None:
-                return
-            dados = json.loads(saida)
-            if len(self._busca) >= 64:
-                self._busca.pop(next(iter(self._busca)))
-            self._busca[musica] = escolher_clipe(dados.get("entries") or [], musica, snap.get("dur", 0))
+            titulo, artista = musica
+            faixa = titulo_base(titulo)
+            subtitulo = normalizar(titulo.removeprefix(faixa))
+            arranjos = [a for a in ARRANJOS if contem(subtitulo, a)]
+            consulta = " ".join([artista, faixa, *arranjos])
+            entradas = []
+            candidatos = []
+            for texto in (f"{consulta} official music video", consulta):
+                try:
+                    saida = self._youtube(["--flat-playlist", "--dump-single-json", "--",
+                                           f"ytsearch12:{texto}"], chave)
+                except RuntimeError:
+                    if candidatos:
+                        break
+                    raise
+                if saida is None:
+                    return []
+                entradas.extend(json.loads(saida).get("entries") or [])
+                candidatos = classificar_clipes(entradas, musica, duracao)
+                if candidatos and candidatos[0].oficial:
+                    break
+            if candidatos:
+                if len(self._busca) >= 64:
+                    self._busca.pop(next(iter(self._busca)))
+                self._busca[musica] = candidatos
+            return candidatos
         return self._busca[musica]
 
-    def _baixar_video(self, video, pasta, chave):
+    def _baixar_video(self, video, pasta, chave, timeout):
         saida = self._youtube(["--no-playlist", "--no-part", "--max-filesize", "45M",
+                               "--match-filters", "description !^=? 'Provided to YouTube by'",
                                "-f", "b[height<=480][protocol=https]/bv[height<=480][protocol=https]",
                                "-o", str(pasta / "clipe.%(ext)s"), "--",
-                               f"https://www.youtube.com/watch?v={video}"], chave, timeout=40)
+                               f"https://www.youtube.com/watch?v={video}"], chave, timeout=timeout)
         if saida is not None:
             return next(pasta.glob("clipe.*"), None)
-        for parcial in pasta.glob("clipe.*"):
-            parcial.unlink()
+
+    def _carregar_clipe(self, snap, chave, pasta):
+        candidatos = self._buscar_clipes(snap, chave)
+        if not candidatos:
+            return
+        self._mensagem("Carregando clipe…")
+        limite = time.monotonic() + 48
+        ultima_falha = None
+        for candidato in candidatos[:5]:
+            restante = limite - time.monotonic()
+            if self._chave() != chave or restante <= 0:
+                break
+            try:
+                arquivo = self._baixar_video(candidato.id, pasta, chave, timeout=min(40, restante))
+                if arquivo and (candidato.oficial or video_tem_movimento(arquivo)):
+                    return arquivo
+            except RuntimeError as exc:
+                ultima_falha = exc
+            for parcial in pasta.glob("clipe.*"):
+                parcial.unlink(missing_ok=True)
+        if ultima_falha is not None and self._chave() == chave:
+            raise ultima_falha
 
     def _ler_quadros(self, proc, inicio, quadros, cancelar):
         indice = 0
@@ -313,12 +417,9 @@ class FonteClipe:
                             for anterior in pasta.glob("clipe.*"):
                                 anterior.unlink()
                             musica_salva = arquivo = None
-                            video = self._buscar_video(snap, chave)
-                            if video and self._chave() == chave:
-                                self._mensagem("Carregando clipe…")
-                                arquivo = self._baixar_video(video, pasta, chave)
-                                if arquivo:
-                                    musica_salva = chave[0]
+                            arquivo = self._carregar_clipe(snap, chave, pasta)
+                            if arquivo:
+                                musica_salva = chave[0]
                         if arquivo:
                             while self._chave() == chave and self._reproduzir(arquivo, chave):
                                 pass

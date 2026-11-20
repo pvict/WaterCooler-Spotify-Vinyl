@@ -1,15 +1,25 @@
+import json
 import shutil
 import subprocess
 import threading
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from controle_interface import validar
-from modo_clipe import FILTRO_CLIPE, FPS_CLIPE, FonteClipe, QuadrosClipe, escolher_clipe, posicao_atual
+from modo_clipe import (FILTRO_CLIPE, FPS_CLIPE, CandidatoClipe, FonteClipe, QuadrosClipe,
+                        classificar_clipes, posicao_atual, titulo_base, video_tem_movimento)
 
 
 def entrada(id, titulo, canal="Artista", duracao=200):
     return {"id": id, "title": titulo, "channel": canal, "duration": duracao}
+
+
+def escolher_clipe(entradas, musica, duracao):
+    candidatos = classificar_clipes(entradas, musica, duracao)
+    return candidatos[0].id if candidatos else None
 
 
 class ModoClipeTest(unittest.TestCase):
@@ -44,8 +54,106 @@ class ModoClipeTest(unittest.TestCase):
 
     def test_nao_escolhe_publicacao_so_de_audio(self):
         candidatos = [entrada("aaaaaaaaaaa", "Artista - Coração (Audio)"),
-                      entrada("bbbbbbbbbbb", "Artista - Coração")]
+                      entrada("bbbbbbbbbbb", "Artista - Coração (Official Lyrics)")]
         self.assertIsNone(escolher_clipe(candidatos, ("Coração", "Artista"), 200))
+
+    def test_titulo_canonico_remove_variacoes_de_edicao(self):
+        for titulo in ("Girl on the Moon - 2025 Remix", "Girl on the Moon (2025 Remix)",
+                       "Girl on the Moon [Remastered 2025]", "Girl on the Moon – Radio Edit",
+                       "Girl on the Moon (feat. Convidada)", "Girl on the Moon (2025 Remixed)"):
+            self.assertEqual(titulo_base(titulo), "Girl on the Moon")
+
+    def test_prioriza_original_oficial_sobre_remix_e_outros_canais(self):
+        candidatos = [
+            entrada("eeeeeeeeeee", "Girl on the Moon", "Foreigner", 230),
+            entrada("aaaaaaaaaaa", "Foreigner - Girl On The Moon (1981) HD", "BackToRock", 228),
+            entrada("bbbbbbbbbbb", "Foreigner - Girl On The Moon (2025 Remix) (Official Music Video)",
+                    "Foreigner", 230),
+            entrada("ccccccccccc", "Foreigner - Girl On The Moon (Official Music Video)", "RHINO", 247),
+            entrada("ddddddddddd", "Ronnie Romero - Girl On The Moon (Foreigner cover) (Official Video)",
+                    "Frontiers", 230),
+        ]
+        faixa = ("Girl on the Moon - 2025 Remix", "Foreigner")
+        resultados = classificar_clipes(candidatos, faixa, 230)
+        self.assertEqual([c.id for c in resultados], ["ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa", "eeeeeeeeeee"])
+        self.assertEqual([c.oficial for c in resultados], [True, True, False, False])
+
+    def test_rejeita_titulo_parecido_e_interprete_diferente(self):
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Artista - Stay With Me (Official Video)"),
+            entrada("bbbbbbbbbbb", "Outra Banda - Stay (Artista) (Official Video)", "Outra Banda"),
+            entrada("ccccccccccc", "Artista - Stay (Official Video)"),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, ("Stay", "Artista"), 200)],
+                         ["ccccccccccc"])
+
+    def test_distingue_artista_topic_de_canal_automatico(self):
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Topic - Breaking Me (Official Video)", "Topic"),
+            entrada("bbbbbbbbbbb", "Topic - Breaking Me (Official Video)", "Topic - Topic"),
+        ]
+        resultados = classificar_clipes(candidatos, ("Breaking Me", "Topic"), 200)
+        self.assertEqual([c.id for c in resultados], ["aaaaaaaaaaa"])
+
+    def test_busca_canonica_repete_sem_termos_de_clipe_se_necessario(self):
+        musica = ("Girl on the Moon - 2025 Remix", "Foreigner")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 230}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        resposta = {"entries": [entrada("aaaaaaaaaaa", "Foreigner - Girl on the Moon (1981) HD",
+                                        "BackToRock", 228)]}
+        with patch.object(fonte, "_youtube", side_effect=[b'{"entries":[]}', json.dumps(resposta).encode()]) as yt:
+            self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa"])
+        consultas = [chamada.args[0][-1] for chamada in yt.call_args_list]
+        self.assertEqual(consultas, ["ytsearch12:Foreigner Girl on the Moon official music video",
+                                     "ytsearch12:Foreigner Girl on the Moon"])
+
+    def test_preserva_resultado_quando_a_busca_complementar_falha(self):
+        musica = ("Girl on the Moon - 2025 Remix", "Foreigner")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 230}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        resposta = {"entries": [entrada("aaaaaaaaaaa", "Foreigner - Girl on the Moon (1981) HD",
+                                        "BackToRock", 228)]}
+        with patch.object(fonte, "_youtube", side_effect=[json.dumps(resposta).encode(), RuntimeError]):
+            self.assertEqual([c.id for c in fonte._buscar_clipes(snap, chave)], ["aaaaaaaaaaa"])
+
+    def test_tenta_proximo_video_quando_principal_falha_ou_e_estatico(self):
+        musica = ("Girl on the Moon - 2025 Remix", "Foreigner")
+        chave = (musica, 1)
+        snap = {"musica": musica, "reproducao_id": 1, "tocando": True, "dur": 230}
+        fonte = FonteClipe(lambda: snap, lambda: True, lambda _: None, lambda _: None)
+        candidatos = [CandidatoClipe("aaaaaaaaaaa", True), CandidatoClipe("bbbbbbbbbbb", False),
+                      CandidatoClipe("ccccccccccc", False)]
+        tentativas = []
+
+        def baixar(video, pasta, _chave, timeout):
+            tentativas.append(video)
+            if video == "aaaaaaaaaaa":
+                raise RuntimeError("Indisponível")
+            arquivo = pasta / "clipe.mp4"
+            self.assertFalse(arquivo.exists())
+            arquivo.write_text(video, encoding="utf-8")
+            return arquivo
+
+        with TemporaryDirectory() as pasta, \
+             patch.object(fonte, "_buscar_clipes", return_value=candidatos), \
+             patch.object(fonte, "_baixar_video", side_effect=baixar), \
+             patch("modo_clipe.video_tem_movimento", side_effect=[False, True]):
+            arquivo = fonte._carregar_clipe(snap, chave, Path(pasta))
+            self.assertEqual(arquivo.read_text(encoding="utf-8"), "ccccccccccc")
+        self.assertEqual(tentativas, ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
+    def test_detecta_imagem_estatica_antes_de_usar_video_alternativo(self):
+        with TemporaryDirectory() as pasta:
+            for nome, origem, esperado in (("estatico", "color=c=blue:", False),
+                                          ("animado", "testsrc2=", True)):
+                arquivo = Path(pasta) / f"{nome}.mp4"
+                subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+                                "-i", f"{origem}s=128x128:r=8:d=20",
+                                "-c:v", "libx264", str(arquivo)], check=True, timeout=10)
+                self.assertIs(video_tem_movimento(arquivo), esperado)
 
     def test_posicao_avanca_so_quando_tocando(self):
         snap = {"pos": 12, "t_poll": 10, "tocando": True}
