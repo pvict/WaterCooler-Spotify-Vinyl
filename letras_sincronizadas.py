@@ -2,13 +2,16 @@
 
 import bisect
 import json
+import random
 import re
 import threading
 import time
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from http.client import HTTPException
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -17,6 +20,12 @@ _TEMPO = r"(\d{1,3}):([0-5]\d)(?:[.:](\d{1,3}))?"
 _MARCA = re.compile(r"\[" + _TEMPO + r"\]")
 _PALAVRA = re.compile(r"<" + _TEMPO + r">")
 _OFFSET = re.compile(r"^\s*\[offset:\s*([+-]?\d{1,7})\s*\]", re.I | re.M)
+_CREDITO = r"(?:(?:feat(?:uring)?|ft)\.?|part\.|participa[cç][aã]o de)\s+"
+_CREDITO_TITULO = re.compile(r"\s*(?:[(\[]\s*" + _CREDITO + r"([^()\[\]]+)[)\]]|"
+                           r"[-–—]\s*" + _CREDITO + r"(.+))\s*$", re.I)
+_SEPARAR_ARTISTAS = re.compile(r"\s*[,;]\s*|\s+" + _CREDITO, re.I)
+_SUFIXO_TITULO = re.compile(r"\s+[-–—]\s+")
+_APOSTROFOS = str.maketrans("", "", "'‘’")
 _LIMITE_RESPOSTA = 1024 * 1024
 _LIMITE_CACHE = 64
 _CACHE_POSITIVO = 8 * 60 * 60
@@ -25,6 +34,9 @@ _CACHE_FALHA = 45
 _FALHAS_BUSCA = (HTTPException, OSError, ValueError)
 _TOLERANCIA_DURACAO = 2
 _TOLERANCIA_MESMO_ALBUM = 8
+_IDENTIFICACAO = "Turing Vinyl (https://github.com/pvict/WaterCooler-Spotify-Vinyl)"
+_BLOQUEIO_HTTP = threading.Lock()
+_PROXIMO_PEDIDO = {}
 
 
 @dataclass(frozen=True)
@@ -69,7 +81,7 @@ def ler_lrc(lrc):
     lrc = lrc.lstrip("\ufeff")
     ajuste = _OFFSET.search(lrc)
     offset = int(ajuste[1]) if ajuste else 0
-    versos = {}
+    versos = []
     for linha in lrc.splitlines():
         linha = linha.strip()
         marcas = []
@@ -81,11 +93,18 @@ def ler_lrc(lrc):
             linha = linha[marca.end():].lstrip()
         if not marcas:
             continue
-        texto = " ".join(_PALAVRA.sub("", linha).split())[:1200]
-        for instante in marcas:
-            simultaneas = versos.setdefault(instante, [])
-            if texto and texto not in simultaneas:
-                simultaneas.append(texto)
+        texto = _PALAVRA.sub("", linha)
+        versos.extend((instante, texto) for instante in marcas)
+    return _letra_de_versos(versos)
+
+
+def _letra_de_versos(linhas):
+    versos = {}
+    for instante, linha in linhas:
+        texto = " ".join(linha.split())[:1200]
+        simultaneas = versos.setdefault(instante, [])
+        if texto and texto not in simultaneas:
+            simultaneas.append(texto)
     if not any(versos.values()):
         return None
     tempos = tuple(sorted(versos))
@@ -98,72 +117,208 @@ def _normalizar(valor):
     return ""
 
 
-def _obter_json(caminho, parametros):
-    url = f"https://lrclib.net/api/{caminho}?{urlencode(parametros)}"
+def _chave_texto(valor):
+    decomposto = unicodedata.normalize("NFD", _normalizar(valor)).translate(_APOSTROFOS)
+    sem_acentos = "".join(caractere for caractere in decomposto if not unicodedata.combining(caractere))
+    return " ".join(re.findall(r"[^\W_]+", sem_acentos))
+
+
+def _titulo_e_credito(titulo):
+    titulo = _normalizar(titulo)
+    credito = _CREDITO_TITULO.search(titulo)
+    if credito is None:
+        return titulo, ""
+    artistas = credito[1] or credito[2]
+    if _SUFIXO_TITULO.search(artistas):
+        return titulo, ""
+    return titulo[:credito.start()].rstrip(), artistas
+
+
+def _creditos(artista):
+    return tuple(filter(None, map(_chave_texto, _SEPARAR_ARTISTAS.split(_normalizar(artista)))))
+
+
+def _consulta_alternativa(faixa):
+    titulo, _ = _titulo_e_credito(faixa.titulo)
+    artistas = _creditos(faixa.artista)
+    diversificar = (titulo != _normalizar(faixa.titulo) or _chave_texto(titulo) != titulo
+                   or artistas != (_normalizar(faixa.artista),))
+    if diversificar and artistas:
+        return {"q": f"{_chave_texto(titulo)} {artistas[0]}"}
+
+
+def _tempo_retry_after(valor):
+    if valor:
+        try:
+            return max(0, int(valor))
+        except ValueError:
+            try:
+                return max(0, parsedate_to_datetime(valor).timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return _CACHE_FALHA
+
+
+def _requisitar_json(base, caminho, parametros):
+    with _BLOQUEIO_HTTP:
+        if time.monotonic() < _PROXIMO_PEDIDO.get(base, 0):
+            raise TimeoutError("Aguardando nova consulta ao catálogo de letras")
+    url = f"{base}/{caminho}?{urlencode(parametros)}"
     pedido = Request(url, headers={
         "Accept": "application/json",
-        "User-Agent": "Turing Vinyl (https://github.com/pvict/WaterCooler-Spotify-Vinyl)",
+        "User-Agent": _IDENTIFICACAO,
     })
-    with urlopen(pedido, timeout=4) as resposta:
-        dados = resposta.read(_LIMITE_RESPOSTA + 1)
+    try:
+        with urlopen(pedido, timeout=4) as resposta:
+            dados = resposta.read(_LIMITE_RESPOSTA + 1)
+    except HTTPError as erro:
+        if erro.code in (429, 503):
+            retry_after = erro.headers.get("Retry-After") if erro.headers else None
+            atraso = _tempo_retry_after(retry_after) + random.uniform(0, 1)
+            with _BLOQUEIO_HTTP:
+                _PROXIMO_PEDIDO[base] = time.monotonic() + atraso
+        raise
     if len(dados) > _LIMITE_RESPOSTA:
-        raise ValueError("Resposta do LRCLIB excedeu o limite")
+        raise ValueError("Resposta do catálogo de letras excedeu o limite")
     return json.loads(dados)
+
+
+def _obter_json(caminho, parametros):
+    return _requisitar_json("https://lrclib.net", f"api/{caminho}", parametros)
+
+
+def _obter_mux(parametros):
+    return _requisitar_json("https://api.lrcmux.dev", "get", parametros)
+
+
+def _prioridade_faixa(faixa, titulo, artista, album, duracao, aceitar_mesmo_album):
+    titulo_local, participacao_local = _titulo_e_credito(faixa.titulo)
+    titulo_remoto, participacao_remota = _titulo_e_credito(titulo)
+    chave_local = _chave_texto(titulo_local) or titulo_local
+    chave_remota = _chave_texto(titulo_remoto) or titulo_remoto
+    if not chave_local or chave_local != chave_remota:
+        return None
+    local, remoto = _creditos(faixa.artista), _creditos(artista)
+    if not local or not remoto or local[0] != remoto[0]:
+        return None
+    mesmo_album = bool(_chave_texto(faixa.album)) and _chave_texto(faixa.album) == _chave_texto(album)
+    creditos_locais = set(local[1:]) | set(_creditos(participacao_local))
+    creditos_remotos = set(remoto[1:]) | set(_creditos(participacao_remota))
+    creditos_incompletos = creditos_locais != creditos_remotos
+    if creditos_incompletos and not (mesmo_album and (creditos_locais <= creditos_remotos
+                                                     or creditos_remotos <= creditos_locais)):
+        return None
+    if type(duracao) not in (int, float) or not 1 <= duracao <= 3600:
+        return None
+    diferenca = abs(duracao - faixa.duracao)
+    aproximada = diferenca > _TOLERANCIA_DURACAO
+    # O timeline do Spotify no Windows pode reportar alguns segundos a menos.
+    if aproximada and not (aceitar_mesmo_album and mesmo_album and diferenca <= _TOLERANCIA_MESMO_ALBUM):
+        return None
+    return aproximada, not mesmo_album, creditos_incompletos, diferenca
+
+
+def _tem_letra_na_faixa(letra, faixa):
+    return letra is not None and any(t <= faixa.duracao * 1000 and linha
+                                     for t, linha in zip(letra.tempos, letra.linhas))
 
 
 def _melhor_letra(registros, faixa, aceitar_mesmo_album=False):
     melhor = None
-    titulo, artista, album = map(_normalizar, (faixa.titulo, faixa.artista, faixa.album))
     for registro in registros:
         if not isinstance(registro, dict) or registro.get("instrumental"):
             continue
-        if (_normalizar(registro.get("trackName") or registro.get("name")) != titulo
-                or _normalizar(registro.get("artistName")) != artista):
-            continue
-        duracao = registro.get("duration")
-        if not isinstance(duracao, (int, float)) or not 1 <= duracao <= 3600:
-            continue
-        diferenca = abs(duracao - faixa.duracao)
-        mesmo_album = bool(album) and _normalizar(registro.get("albumName")) == album
-        duracao_aproximada = diferenca > _TOLERANCIA_DURACAO
-        # O timeline do Spotify no Windows pode reportar alguns segundos a menos.
-        if duracao_aproximada and not (
-            aceitar_mesmo_album and mesmo_album and diferenca <= _TOLERANCIA_MESMO_ALBUM
-        ):
+        prioridade = _prioridade_faixa(faixa, registro.get("trackName") or registro.get("name"),
+                                       registro.get("artistName"), registro.get("albumName"),
+                                       registro.get("duration"), aceitar_mesmo_album)
+        if prioridade is None or (melhor is not None and prioridade >= melhor[0]):
             continue
         letra = ler_lrc(registro.get("syncedLyrics"))
-        if letra is None or not any(t <= faixa.duracao * 1000 and linha
-                                    for t, linha in zip(letra.tempos, letra.linhas)):
-            continue
-        prioridade = (duracao_aproximada, not mesmo_album, diferenca)
-        if melhor is None or prioridade < melhor[0]:
+        if _tem_letra_na_faixa(letra, faixa):
             melhor = prioridade, letra
     return melhor[1] if melhor else None
 
 
-def buscar_letra(faixa, obter=_obter_json, esperar=time.sleep):
+def _buscar_lrclib(faixa, obter, esperar):
     consulta = {"track_name": faixa.titulo, "artist_name": faixa.artista}
     exata = dict(consulta, duration=faixa.duracao)
     if faixa.album:
         exata["album_name"] = faixa.album
     try:
         registro = obter("get", exata)
+    except HTTPError as erro:
+        if erro.code in (429, 503):
+            raise
+        registro = None
     except _FALHAS_BUSCA:
         registro = None
     letra = _melhor_letra((registro,), faixa)
     if letra is not None:
         return letra
-    esperar(0.25)
+    for termos in (consulta, _consulta_alternativa(faixa)):
+        if termos is None:
+            break
+        esperar(0.25)
+        try:
+            registros = obter("search", termos)
+            if not isinstance(registros, list):
+                raise ValueError("Resposta inválida da pesquisa do LRCLIB")
+        except _FALHAS_BUSCA:
+            letra = _melhor_letra((registro,), faixa, aceitar_mesmo_album=True)
+            if letra is None:
+                raise
+            return letra
+        letra = _melhor_letra((registro, *registros), faixa, aceitar_mesmo_album=True)
+        if letra is not None:
+            return letra
+
+
+def _buscar_mux(faixa, obter):
+    consulta = {"title": faixa.titulo, "artist": faixa.artista, "duration": faixa.duracao,
+                "format": "json", "sources": "!lrclib"}
+    if faixa.album:
+        consulta["album"] = faixa.album
     try:
-        registros = obter("search", consulta)
-        if not isinstance(registros, list):
-            raise ValueError("Resposta inválida da pesquisa do LRCLIB")
-    except _FALHAS_BUSCA:
-        letra = _melhor_letra((registro,), faixa, aceitar_mesmo_album=True)
-        if letra is None:
-            raise
-        return letra
-    return _melhor_letra((registro, *registros), faixa, aceitar_mesmo_album=True)
+        dados = obter(consulta)
+    except HTTPError as erro:
+        if erro.code == 404:
+            return None
+        raise
+    if not isinstance(dados, dict):
+        raise ValueError("Resposta inválida do LRCMux")
+    faixa_remota, meta, linhas = dados.get("track"), dados.get("meta"), dados.get("lines")
+    if (not isinstance(faixa_remota, dict) or not isinstance(meta, dict)
+            or meta.get("instrumental") or meta.get("level") not in ("line", "word")
+            or not isinstance(linhas, list)):
+        return None
+    fonte = meta.get("source")
+    if not isinstance(fonte, dict) or fonte.get("id") in (None, "", "lrclib"):
+        return None
+    prioridade = _prioridade_faixa(faixa, faixa_remota.get("title"), faixa_remota.get("artist"),
+                                   faixa_remota.get("album"), faixa_remota.get("duration"),
+                                   aceitar_mesmo_album=True)
+    if prioridade is None:
+        return None
+    limite = (faixa.duracao + _TOLERANCIA_MESMO_ALBUM) * 1000
+    versos = ((linha["start"], linha["text"]) for linha in linhas
+              if isinstance(linha, dict) and type(linha.get("start")) is int
+              and 0 <= linha["start"] <= limite and isinstance(linha.get("text"), str))
+    letra = _letra_de_versos(versos)
+    return letra if _tem_letra_na_faixa(letra, faixa) else None
+
+
+def buscar_letra(faixa, obter=_obter_json, esperar=time.sleep, *, obter_mux=_obter_mux):
+    falha_lrclib = None
+    try:
+        letra = _buscar_lrclib(faixa, obter, esperar)
+        if letra is not None:
+            return letra
+    except _FALHAS_BUSCA as erro:
+        falha_lrclib = erro
+    letra = _buscar_mux(faixa, obter_mux)
+    if letra is None and falha_lrclib is not None:
+        raise falha_lrclib
+    return letra
 
 
 class FonteLetras:
