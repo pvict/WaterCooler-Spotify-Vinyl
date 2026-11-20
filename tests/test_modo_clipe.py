@@ -137,6 +137,56 @@ class ModoClipeTest(unittest.TestCase):
         self.assertEqual([c.id for c in classificar_clipes(candidatos, ("Stay", "Artista"), 200)],
                          ["ccccccccccc"])
 
+    def test_aceita_nomes_bilingues_sem_trocar_por_coreografia_ou_remix(self):
+        candidatos = [
+            entrada("YLXfyHsfFz0", "BTS (방탄소년단) 'Butter (Hotter Remix)' Official MV", "HYBE LABELS", 196),
+            entrada("WMweEpGlu_U", "BTS (방탄소년단) 'Butter' Official MV", "HYBE LABELS", 183),
+            entrada("DbXMjAYSa68", "[CHOREOGRAPHY] BTS (방탄소년단) 'Butter' Special Performance Video",
+                    "BANGTANTV", 177),
+            entrada("TQTlCHxyuu8", 'Stray Kids "神메뉴(God\'s Menu)" M/V', "JYP Entertainment", 187),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, ("Butter", "BTS"), 164)],
+                         ["WMweEpGlu_U"])
+        self.assertEqual(escolher_clipe(candidatos, ("God's Menu", "Stray Kids"), 168), "TQTlCHxyuu8")
+
+    def test_reconhece_creditos_de_participacao_e_rotulos_em_ordens_diferentes(self):
+        candidatos = [
+            entrada("N000qglmmY0", "Dua Lipa - Levitating (Official Animated Music Video)", "Dua Lipa", 210),
+            entrada("TUVcZfQe-Kw", "Dua Lipa - Levitating Featuring DaBaby (Official Music Video)", "Dua Lipa", 231),
+            entrada("3YxaaGgTQYM", "Evanescence - Bring Me To Life (Official HD Music Video) ft. Paul McCoy",
+                    "Evanescence", 254),
+            entrada("aaaaaaaaaaa", "Clipe Oficial | A Faixa • Artista | 4K", "Gravadora"),
+            entrada("bbbbbbbbbbb", "Artista - A Faixa (Outra Canção) | 4K", "Artista"),
+        ]
+        self.assertEqual(escolher_clipe(candidatos, ("Levitating (feat. DaBaby)", "Dua Lipa"), 203), "TUVcZfQe-Kw")
+        self.assertEqual(escolher_clipe(candidatos, ("Bring Me To Life", "Evanescence"), 235), "3YxaaGgTQYM")
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, ("A Faixa", "Artista"), 200)],
+                         ["aaaaaaaaaaa"])
+
+    def test_tolera_um_erro_de_grafia_somente_com_evidencia_de_autoria(self):
+        musica = ("Purple Rain", "Prince")
+        variantes = [
+            dict(entrada("aaaaaaaaaaa", "Prince - Purle Rain (Official Video)", "Prince"), channel_is_verified=True),
+            entrada("bbbbbbbbbbb", "Prince - Purle Rain (Official Video)", "Fã de Prince"),
+            dict(entrada("ccccccccccc", "Prince - Purple Rains (Official Video)", "Prince"), channel_is_verified=True),
+            dict(entrada("ddddddddddd", "Prince - Purple Rain Again (Official Video)", "Prince"),
+                 channel_is_verified=True),
+        ]
+        candidatos = classificar_clipes(variantes, musica, 200)
+        self.assertEqual([c.id for c in candidatos], ["aaaaaaaaaaa"])
+        self.assertTrue(candidatos[0].exigir_movimento)
+        exato = entrada("eeeeeeeeeee", "Prince - Purple Rain", "Prince")
+        self.assertEqual(escolher_clipe([*variantes, exato], musica, 200), "eeeeeeeeeee")
+
+    def test_admite_duracao_maior_no_clipe_do_canal_verificado(self):
+        musica = ("The Less I Know The Better", "Tame Impala")
+        candidatos = [
+            entrada("aaaaaaaaaaa", "Tame Impala - The Less I Know The Better (Official Video)", "Fã", 343),
+            dict(entrada("sBzrzS1Ag_g", "Tame Impala - The Less I Know The Better (Official Video)",
+                         "Tame Impala", 343), channel_is_verified=True),
+        ]
+        self.assertEqual([c.id for c in classificar_clipes(candidatos, musica, 216)], ["sBzrzS1Ag_g"])
+
     def test_encontra_o_video_do_artista_quando_o_titulo_so_acrescenta_mencoes(self):
         musica = ("Resenha da Muierada", "Muierada")
         candidatos = [
