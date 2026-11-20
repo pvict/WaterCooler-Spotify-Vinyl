@@ -62,6 +62,49 @@ class TestLetrasSincronizadas(unittest.TestCase):
         assert buscar_letra(faixa(), obter=obter, esperar=lambda _: None) is None
 
 
+    def test_lrclib_recupera_love_exalando_com_duracao_menor_no_windows(self):
+        musica = FaixaLetra("Love Exalando", "Leo Balbinotti", "Love Exalando", 137)
+
+        def obter(caminho, parametros):
+            if caminho == "get":
+                assert parametros == {"track_name": musica.titulo, "artist_name": musica.artista,
+                                      "album_name": musica.album, "duration": 137}
+                raise HTTPError("https://lrclib.net/api/get", 404, "Track not found", None, None)
+            assert caminho == "search"
+            assert parametros == {"track_name": musica.titulo, "artist_name": musica.artista}
+            return [registro(trackName=musica.titulo, artistName=musica.artista,
+                             albumName=musica.album, duration=143,
+                             syncedLyrics="[00:02.48]Linha de teste")]
+
+        letra = buscar_letra(musica, obter=obter, esperar=lambda _: None)
+        assert letra is not None
+        assert letra.tempos == (2480,)
+
+    def test_lrclib_reserva_tolerancia_maior_para_o_mesmo_album(self):
+        def obter(caminho, parametros):
+            if caminho == "get":
+                return registro(duration=137)
+            return [registro(duration=137), registro(duration=126, albumName="Coletânea")]
+
+        assert buscar_letra(faixa(), obter=obter, esperar=lambda _: None) is None
+
+    def test_lrclib_prefere_duracao_exata_a_mesmo_album_com_duracao_incompativel(self):
+        def obter(caminho, parametros):
+            if caminho == "get":
+                return registro(duration=126)
+            return [registro(duration=120, albumName="Coletânea", syncedLyrics="[00:04]Linha de teste")]
+
+        assert buscar_letra(faixa(), obter=obter, esperar=lambda _: None).tempos == (4000,)
+
+    def test_lrclib_tenta_busca_quando_requisicao_exata_expira(self):
+        def obter(caminho, parametros):
+            if caminho == "get":
+                raise TimeoutError("tempo limite")
+            return [registro()]
+
+        assert buscar_letra(faixa(), obter=obter, esperar=lambda _: None).tempos == (2000,)
+
+
     def test_fonte_busca_fora_da_thread_do_quadro_e_nao_entrega_faixa_anterior(self):
         iniciou = threading.Event()
         liberar = threading.Event()
@@ -81,19 +124,38 @@ class TestLetrasSincronizadas(unittest.TestCase):
         fonte = FonteLetras(buscar=buscar)
         fonte.iniciar()
         try:
-            assert fonte.consultar(faixa()) is None
+            assert fonte.consultar(faixa()).situacao == "buscando"
             assert iniciou.wait(1)
             destino = faixa("Ponte de Luz")
-            assert fonte.consultar(destino) is None
+            assert fonte.consultar(destino).situacao == "buscando"
             liberar.set()
             assert segunda.wait(1)
-            assert fonte.consultar(destino) is None
+            assert esperar_resultado(fonte, destino).situacao == "indisponivel"
 
-            prazo = time.monotonic() + 1
-            while fonte.consultar(faixa()) is None and time.monotonic() < prazo:
-                time.sleep(0.01)
-            assert fonte.consultar(faixa()) is letra
+            resultado = fonte.consultar(faixa())
+            assert resultado.situacao == "pronta"
+            assert resultado.letra is letra
             assert chamadas == [faixa(), destino]
         finally:
             liberar.set()
             fonte.fechar()
+
+    def test_fonte_distingue_falha_temporaria_e_limpa_consulta_ao_desativar(self):
+        def buscar(_):
+            raise TimeoutError("tempo limite")
+
+        fonte = FonteLetras(buscar=buscar)
+        fonte.iniciar()
+        self.addCleanup(fonte.fechar)
+
+        assert esperar_resultado(fonte, faixa()).situacao == "erro"
+        assert fonte.consultar(None).situacao == ""
+
+
+def esperar_resultado(fonte, musica):
+    prazo = time.monotonic() + 1
+    while True:
+        resultado = fonte.consultar(musica)
+        if resultado.situacao != "buscando" or time.monotonic() >= prazo:
+            return resultado
+        time.sleep(0.01)

@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from letras_sincronizadas import FaixaLetra
 
 MODOS = ("dinamico", "spotify", "video", "clipe")
 LIMITE_SINCRONIA_CLIPE_MS = 3000
@@ -96,6 +97,23 @@ def brilho_horario(agora=None):
     return 30 if 1 <= h < 7 else (60 if h >= 18 or h < 1 else 100)
 
 
+def faixa_para_letras(config, snap):
+    if not config["letras_ativas"] or not config["tela_ligada"] or config["gaming"]:
+        return None
+    modo = config["modo"]
+    if modo in ("spotify", "clipe") or (modo == "dinamico" and snap.get("tocando")):
+        return FaixaLetra.do_spotify(snap)
+
+
+def status_letras_atual(config, snap):
+    status = snap.get("status_letras")
+    if status is not None and snap.get("tela_conectada"):
+        faixa, modo, situacao = status
+        if modo == config["modo"] and faixa == faixa_para_letras(config, snap):
+            return situacao
+    return ""
+
+
 class Controles:
     def __init__(self, interface=False):
         self.interface = interface
@@ -161,8 +179,9 @@ def iniciar_ponte(controles, estado, parar, log):
             pacote = {}
             if agora >= proximo_estado or capa is not ultima_capa:
                 proximo_estado = agora + 0.7
+                config = controles.config
                 pacote.update(
-                    config=controles.config, brilho_atual=controles.brilho(),
+                    config=config, brilho_atual=controles.brilho(),
                     conectada=snap.get("tela_conectada", False),
                     musica=midia.get("musica"), tocando=snap.get("tocando", False),
                     playlist_nome=snap.get("playlist_nome"),
@@ -170,6 +189,7 @@ def iniciar_ponte(controles, estado, parar, log):
                     fundo_ocioso_ativo=snap.get("fundo_ocioso_ativo"),
                     erro_fundo=snap.get("erro_fundo", ""),
                     status_clipe=snap.get("status_clipe", ""),
+                    status_letras="" if controles.gaming_ativo else status_letras_atual(config, snap),
                     gaming_ativo=controles.gaming_ativo,
                     gaming_preparando=snap.get("gaming_preparando", False),
                     erro_gaming=snap.get("erro_gaming", ""),

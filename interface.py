@@ -734,6 +734,8 @@ class Janela(tk.Tk):
         self.letras_botao = Botao(self, "Letras", self.alternar_letras, largura=120, altura=34)
         self.letras_item = c.create_window(601, 533, window=self.letras_botao,
                                           anchor="nw", state="hidden")
+        self.letras_status = self.texto(589, 550, "", self.f_pequena, SECUNDARIO)
+        c.itemconfigure(self.letras_status, anchor="e")
         self.sincronia_clipe_botao = Botao(self, "Sincronia", self.ajustar_sincronia_clipe,
                                           largura=200, altura=34,
                                           dica="Ajustar o tempo do clipe na tela USB")
@@ -1097,9 +1099,31 @@ class Janela(tk.Tk):
         ativas = self.config_usuario["letras_ativas"]
         self.letras_botao.atualizar(selecionado=ativas, cor=self.cor_modo,
                                     dica="Ocultar letras na tela USB" if ativas else "Mostrar letras na tela USB")
+        self.atualizar_status_letras()
+
+    def atualizar_status_letras(self):
+        dados = self.midia or {}
+        config = self.config_usuario
+        config_motor = dados.get("config", {})
+        texto = ""
+        if (self.rodando and dados.get("conectada") and config["letras_ativas"]
+                and config["tela_ligada"] and not config["gaming"]
+                and config["modo"] != "video"
+                and config["modo"] == config_motor.get("modo")
+                and config_motor.get("letras_ativas") and config_motor.get("tela_ligada")):
+            texto = {
+                "buscando": "Buscando letra…",
+                "pronta": "Letra pronta para exibir",
+                "exibindo": "Letra na tela USB",
+                "indisponivel": "Sem letra sincronizada",
+                "erro": "Falha temporária ao buscar letra",
+            }.get(dados.get("status_letras"), "")
+        self.canvas.itemconfigure(self.letras_status, text=texto)
 
     def alternar_letras(self):
         self.config_usuario["letras_ativas"] = not self.config_usuario["letras_ativas"]
+        if self.midia is not None:
+            self.midia.pop("status_letras", None)
         self.atualizar_letras()
         self.guardar()
 
@@ -1231,6 +1255,7 @@ class Janela(tk.Tk):
                 elif tipo in ("parado", "erro"):
                     self.rodando, self.iniciando = False, False
                     self._visual = {}
+                    self.atualizar_status_letras()
                     self.iniciar.atualizar(texto="Iniciar", ativo=True, simbolo="play", dica="Iniciar exibição")
                     self.canvas.itemconfigure(self.status_texto, text="Parada", fill=SECUNDARIO)
                     self.canvas.itemconfigure(self.status_ponto, fill="#89929f")
@@ -1303,6 +1328,7 @@ class Janela(tk.Tk):
                                   fill=SECUNDARIO)
         self.canvas.itemconfigure(self.status_ponto, fill=self.cor_modo if conectada else "#89929f")
         self.midia = dados
+        self.atualizar_status_letras()
         status_clipe = (dados.get("status_clipe", "") if self.config_usuario["modo"] == "clipe"
                         and not self.config_usuario.get("gaming") and conectada else "")
         self.canvas.itemconfigure(self.modo_dica, text=status_clipe)

@@ -33,9 +33,9 @@ from turingscreencli.transport import (
 import ao_vivo
 import animacao_capa
 from spotify_playlist import SpotifyPlaylistWatcher
-from controle_interface import Controles, iniciar_ponte, reservar_execucao, liberar_execucao
+from controle_interface import Controles, faixa_para_letras, iniciar_ponte, reservar_execucao, liberar_execucao
 from fundo_usuario import FundoOcioso
-from letras_sincronizadas import FaixaLetra, FonteLetras
+from letras_sincronizadas import FonteLetras
 from letras_visual import VisualLetras
 from modo_clipe import FPS_CLIPE, FonteClipe, posicao_atual
 from modo_gaming import PreparadorGaming, PipelinePreparado, FPS_GAMING
@@ -82,7 +82,7 @@ parar = threading.Event()
 controles = Controles(interface="--interface" in sys.argv)
 estado = {
     "musica": None, "capa": None, "cor_capa": (30, 215, 96, 255),
-    "album": None, "capa_letras": None,
+    "album": None, "capa_letras": None, "status_letras": None,
     "cor_viva": (30, 215, 96, 255),
     "capa_playlist": None, "cor_playlist": None, "cor_viva_playlist": None,
     "playlist_uri": None, "playlist_nome": None, "playlist_evento": 0,
@@ -1157,26 +1157,33 @@ class Painel:
         self.t_ultimo = agora
         self._dt_fundo = dt
         self._checar_brilho(agora)
-        if not controles.config["tela_ligada"]:
+        config = controles.config
+        if not config["tela_ligada"]:
             if self.letras is not None:
                 self.letras.consultar(None)
+            estado["status_letras"] = None
             self._publicar_visual(False)
             return self._quadro_apagado
 
         snap = dict(estado)
-        modo = controles.config["modo"]
-        letras_ativas = controles.config.get("letras_ativas") and (
-            modo in ("spotify", "clipe") or (modo == "dinamico" and snap.get("tocando")))
-        letra = None
+        modo = config["modo"]
+        letra = status_letras = None
         if self.letras is not None:
-            letra = self.letras.consultar(FaixaLetra.do_spotify(snap) if letras_ativas else None)
+            faixa = faixa_para_letras(config, snap)
+            resultado = self.letras.consultar(faixa)
+            if faixa is not None:
+                letra = resultado.letra
+                status_letras = (faixa, modo, resultado.situacao)
         if modo == "clipe" and self.clipe is not None:
             quadro = self.clipe.quadro(snap, agora)
             if quadro is not None:
                 self._publicar_visual(False)
                 if letra is not None:
                     posicao = self.clipe.posicao_letra(snap, time.monotonic())
-                    return self.visual_letras.clipe(quadro, letra, posicao)
+                    legendado = self.visual_letras.clipe(quadro, letra, posicao)
+                    estado["status_letras"] = (faixa, modo, "exibindo") if legendado is not quadro else status_letras
+                    return legendado
+                estado["status_letras"] = status_letras
                 return quadro
         if modo != "dinamico":
             self._retomar_giro_dinamico = False
@@ -1247,6 +1254,7 @@ class Painel:
             self._zerar()
             self._publicar_visual(False)
             self.estava_tocando = tocando
+            estado["status_letras"] = status_letras
             return self._fundo(0.0)
 
         bg = self._fundo(ps)
@@ -1260,13 +1268,17 @@ class Painel:
                 self.erro_log = str(exc)
                 log(f"erro desenhando o painel: {exc}")
             self.estava_tocando = tocando
+            estado["status_letras"] = status_letras
             return bg
         self.estava_tocando = tocando
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
         capa_letras = snap.get("capa_letras")
         if letra is not None and capa_letras is not None and modo in ("spotify", "dinamico"):
             posicao = posicao_atual(snap, time.monotonic())
-            return self.visual_letras.spotify(capa_letras, letra, posicao)
+            quadro = self.visual_letras.spotify(capa_letras, letra, posicao)
+            estado["status_letras"] = (faixa, modo, "exibindo")
+            return quadro
+        estado["status_letras"] = status_letras
         inicio_compor = time.perf_counter()
         if bg.mode == "RGB":
             # Fundo opaco do FFmpeg: aplica o alfa diretamente em RGB, evitando
@@ -1322,7 +1334,7 @@ def sessao_usb(gaming, clipe, letras):
 
             controles.gaming_ativo = economico
             estado.update(tela_conectada=True, erro_interface="", gaming_ativo=economico,
-                          modo_exibicao=controles.modo_efetivo(), visual_disco=None)
+                          modo_exibicao=controles.modo_efetivo(), visual_disco=None, status_letras=None)
             if economico:
                 estado["fundo_ocioso_ativo"] = gaming.origem_do(arquivo_gaming)
             if primeira:
@@ -1373,6 +1385,8 @@ def sessao_usb(gaming, clipe, letras):
                 pipe.rodar()
             finally:
                 parar_sessao.set()
+                letras.consultar(None)
+                estado["status_letras"] = None
                 if ponte_thread is not None:
                     ponte_thread.join(timeout=1)
                 for decoder in (fundo_musica, fundo_ocioso):

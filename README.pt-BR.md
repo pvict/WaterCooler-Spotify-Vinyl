@@ -80,7 +80,9 @@ Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute
 
 No modo **Clipe**, use **Sincronia** para compensar um atraso constante entre o som e a tela USB. Valores positivos adiantam o vídeo. O ajuste fica salvo e vale para todas as faixas.
 
-Ative **Letras** para ver os versos sincronizados na tela USB. Em **Spotify** e **Dinâmico**, a capa ocupa o fundo com desfoque e o verso atual ganha destaque. Em **Clipe**, a letra aparece como legenda sobre o vídeo. A fonte de letras é o [LRCLIB](https://lrclib.net/). Quando não há letra cronometrada para a faixa, a tela mantém a exibição normal.
+O app busca pelo artista e pelo título da faixa no YouTube e tenta os vídeos compatíveis em ordem de visualizações. Publicações só de áudio são descartadas. Se um vídeo não puder ser reproduzido, o app tenta o seguinte.
+
+Ative **Letras** para ver os versos sincronizados na tela USB. Em **Spotify** e **Dinâmico**, a capa ocupa o fundo com desfoque e o verso atual ganha destaque. Em **Clipe**, a letra aparece como legenda sobre o vídeo. O status ao lado de **Letras** indica se o app está buscando, exibindo a letra ou aguardando após uma consulta sem resultado ou com falha. A fonte é o [LRCLIB](https://lrclib.net/). Quando não há letra cronometrada para a faixa, a tela mantém a exibição normal.
 
 | Controle | Para que serve |
 | --- | --- |

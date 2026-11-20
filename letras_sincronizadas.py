@@ -9,7 +9,6 @@ import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
 from http.client import HTTPException
-from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -23,6 +22,9 @@ _LIMITE_CACHE = 64
 _CACHE_POSITIVO = 8 * 60 * 60
 _CACHE_NEGATIVO = 15 * 60
 _CACHE_FALHA = 45
+_FALHAS_BUSCA = (HTTPException, OSError, ValueError)
+_TOLERANCIA_DURACAO = 2
+_TOLERANCIA_MESMO_ALBUM = 8
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,18 @@ class LetraSincronizada:
 
     def indice(self, posicao):
         return bisect.bisect_right(self.tempos, posicao * 1000) - 1
+
+
+@dataclass(frozen=True)
+class ResultadoLetra:
+    situacao: str
+    letra: LetraSincronizada | None = None
+
+
+_OCULTA = ResultadoLetra("")
+_BUSCANDO = ResultadoLetra("buscando")
+_INDISPONIVEL = ResultadoLetra("indisponivel")
+_ERRO = ResultadoLetra("erro")
 
 
 def ler_lrc(lrc):
@@ -97,7 +111,7 @@ def _obter_json(caminho, parametros):
     return json.loads(dados)
 
 
-def _melhor_letra(registros, faixa):
+def _melhor_letra(registros, faixa, aceitar_mesmo_album=False):
     melhor = None
     titulo, artista, album = map(_normalizar, (faixa.titulo, faixa.artista, faixa.album))
     for registro in registros:
@@ -110,13 +124,18 @@ def _melhor_letra(registros, faixa):
         if not isinstance(duracao, (int, float)) or not 1 <= duracao <= 3600:
             continue
         diferenca = abs(duracao - faixa.duracao)
-        if diferenca > 2:
+        mesmo_album = bool(album) and _normalizar(registro.get("albumName")) == album
+        duracao_aproximada = diferenca > _TOLERANCIA_DURACAO
+        # O timeline do Spotify no Windows pode reportar alguns segundos a menos.
+        if duracao_aproximada and not (
+            aceitar_mesmo_album and mesmo_album and diferenca <= _TOLERANCIA_MESMO_ALBUM
+        ):
             continue
         letra = ler_lrc(registro.get("syncedLyrics"))
         if letra is None or not any(t <= faixa.duracao * 1000 and linha
                                     for t, linha in zip(letra.tempos, letra.linhas)):
             continue
-        prioridade = (_normalizar(registro.get("albumName")) != album if album else False, diferenca)
+        prioridade = (duracao_aproximada, not mesmo_album, diferenca)
         if melhor is None or prioridade < melhor[0]:
             melhor = prioridade, letra
     return melhor[1] if melhor else None
@@ -129,16 +148,22 @@ def buscar_letra(faixa, obter=_obter_json, esperar=time.sleep):
         exata["album_name"] = faixa.album
     try:
         registro = obter("get", exata)
-    except HTTPError as erro:
-        if erro.code != 404:
-            raise
+    except _FALHAS_BUSCA:
         registro = None
     letra = _melhor_letra((registro,), faixa)
     if letra is not None:
         return letra
     esperar(0.25)
-    registros = obter("search", consulta)
-    return _melhor_letra(registros, faixa) if isinstance(registros, list) else None
+    try:
+        registros = obter("search", consulta)
+        if not isinstance(registros, list):
+            raise ValueError("Resposta inválida da pesquisa do LRCLIB")
+    except _FALHAS_BUSCA:
+        letra = _melhor_letra((registro,), faixa, aceitar_mesmo_album=True)
+        if letra is None:
+            raise
+        return letra
+    return _melhor_letra((registro, *registros), faixa, aceitar_mesmo_album=True)
 
 
 class FonteLetras:
@@ -167,13 +192,17 @@ class FonteLetras:
 
     def consultar(self, faixa):
         with self._condicao:
+            if self._encerrada:
+                return _OCULTA
             self._desejada = faixa
+            if faixa is None:
+                return _OCULTA
             entrada = self._resultado(faixa)
             if entrada is not None:
                 self._cache.move_to_end(faixa)
                 return entrada[1]
-            if faixa is not None:
-                self._condicao.notify()
+            self._condicao.notify()
+            return _BUSCANDO
 
     def _rodar(self):
         while True:
@@ -185,11 +214,14 @@ class FonteLetras:
                 faixa = self._desejada
             try:
                 letra = self._buscar(faixa)
-                validade = _CACHE_POSITIVO if letra else _CACHE_NEGATIVO
-            except (HTTPException, OSError, ValueError):
-                letra, validade = None, _CACHE_FALHA
+                resultado, validade = ((ResultadoLetra("pronta", letra), _CACHE_POSITIVO)
+                                       if letra else (_INDISPONIVEL, _CACHE_NEGATIVO))
+            except _FALHAS_BUSCA:
+                resultado, validade = _ERRO, _CACHE_FALHA
             with self._condicao:
-                self._cache[faixa] = time.monotonic() + validade, letra
+                if self._encerrada:
+                    return
+                self._cache[faixa] = time.monotonic() + validade, resultado
                 self._cache.move_to_end(faixa)
                 while len(self._cache) > _LIMITE_CACHE:
                     self._cache.popitem(last=False)
