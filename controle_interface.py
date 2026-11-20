@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-MODOS = ("dinamico", "spotify", "video")
+MODOS = ("dinamico", "spotify", "video", "clipe")
 PADRAO = {"modo": "dinamico", "brilho": None, "tela_ligada": True,
           "video_ocioso": None, "video_ocioso_nome": "", "gaming": False,
           "lotus_ativo": False, "lotus_pasta": None,
@@ -161,6 +161,7 @@ def iniciar_ponte(controles, estado, parar, log):
                     cor=midia.get("cor_viva"), erro=snap.get("erro_interface", ""),
                     fundo_ocioso_ativo=snap.get("fundo_ocioso_ativo"),
                     erro_fundo=snap.get("erro_fundo", ""),
+                    status_clipe=snap.get("status_clipe", ""),
                     gaming_ativo=controles.gaming_ativo,
                     gaming_preparando=snap.get("gaming_preparando", False),
                     erro_gaming=snap.get("erro_gaming", ""),

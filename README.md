@@ -75,7 +75,10 @@ The interface labels are currently in Portuguese.
 | **Dinâmico** | Vinyl while music plays; background video when paused or idle. |
 | **Spotify** | Vinyl stays visible; it gently stops and the artwork shrinks on pause. |
 | **Vídeo** | Background video only. |
+| **Clipe** | Finds the track on YouTube and shows the music video on the USB display. Audio stays on Spotify. |
 | **Gaming** | Loops a prepared background at 30 FPS with reduced processing and no music overlays. Switch it off to restore your selected mode. |
+
+To enable **Clipe**, install [Node.js LTS](https://nodejs.org/) and run `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` from the project folder. Reopen the app. This mode uses an unofficial YouTube integration. The display shows vinyl while searching, when paused, or if the video is unavailable. Music videos with intros or different edits may be out of sync.
 
 | Control | What it does |
 | --- | --- |

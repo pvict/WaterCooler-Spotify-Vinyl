@@ -41,6 +41,7 @@ MODOS = [
     ("dinamico", "Dinâmico", "Spotify durante a música; vídeo durante a pausa.", PRATA),
     ("spotify", "Spotify", "Só Spotify. O vinil permanece durante a pausa.", "#717b87"),
     ("video", "Vídeo", "Só o vídeo de fundo, sem informações da música.", "#737c87"),
+    ("clipe", "Clipe", "Mostra na tela USB o clipe do YouTube da faixa em reprodução.", "#737c87"),
 ]
 SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 UI_FPS = 60
@@ -256,35 +257,43 @@ class Botao(CanvasSuave):
 
 
 class Seletor(CanvasSuave):
+    largura = 912
+    margem = 12
+    segmento = (largura - 2 * margem) // len(MODOS)
+    simbolos = ("onda", "spotify", "video", "play")
+
     def __init__(self, master, selecionado, comando, fonte, fonte_pequena):
-        super().__init__(master, width=912, height=92, bg=FUNDO,
+        super().__init__(master, width=self.largura, height=92, bg=FUNDO,
                          highlightthickness=0, takefocus=True, cursor="hand2")
         self.comando, self.fonte, self.fonte_pequena = comando, fonte, fonte_pequena
         self.indice = next(i for i, m in enumerate(MODOS) if m[0] == selecionado)
-        self.x = self.indice * 296 + 12
+        self.x = self.margem + self.indice * self.segmento
         self.cor = MODOS[self.indice][3]
         self.hover_indice, self.hover_t, self.hover_job = None, 0.0, None
         self.hover_alvo = False
-        self.hover_valores = [0.0, 0.0, 0.0]
+        self.hover_valores = [0.0] * len(MODOS)
         self.job = None
         self.bind("<Button-1>", self.clicar)
         self.bind("<Motion>", self.mover_mouse)
         self.bind("<Leave>", lambda e: self.animar_realce(None))
         self.bind("<Left>", lambda e: self.escolher(max(0, self.indice - 1)))
-        self.bind("<Right>", lambda e: self.escolher(min(2, self.indice + 1)))
+        self.bind("<Right>", lambda e: self.escolher(min(len(MODOS) - 1, self.indice + 1)))
         self.bind("<Home>", lambda e: self.escolher(0))
-        self.bind("<End>", lambda e: self.escolher(2))
+        self.bind("<End>", lambda e: self.escolher(len(MODOS) - 1))
         self.bind("<FocusIn>", lambda e: self.desenhar())
         self.bind("<FocusOut>", lambda e: self.desenhar())
         self.dica = Dica(self, MODOS[self.indice][2])
         self.desenhar()
 
+    def indice_em(self, x):
+        return max(0, min(len(MODOS) - 1, (x - self.margem) // self.segmento))
+
     def clicar(self, e):
         self.focus_set()
-        self.escolher(max(0, min(2, int((e.x - 12) / 296))))
+        self.escolher(self.indice_em(e.x))
 
     def mover_mouse(self, e):
-        indice = max(0, min(2, int((e.x - 12) / 296)))
+        indice = self.indice_em(e.x)
         if indice != self.hover_indice or not self.hover_alvo:
             self.dica.texto = ("Modo retomado ao sair de Gaming." if
                                self.master.config_usuario.get("gaming") else MODOS[indice][2])
@@ -322,7 +331,7 @@ class Seletor(CanvasSuave):
             self.job = None
         origem_x = self.x
         self.indice = indice
-        inicio, destino = time.monotonic(), indice * 296 + 12
+        inicio, destino = time.monotonic(), self.margem + indice * self.segmento
         precisao_animacao(self, "selecao", True)
         self.comando(MODOS[indice][0])
 
@@ -339,26 +348,27 @@ class Seletor(CanvasSuave):
 
     def desenhar(self):
         if not hasattr(self, "face_item"):
-            self.imagem(0, 0, superficie((912, 92), FUNDO, raio=30, pressionado=True), anchor="nw")
-            self.face_item = self.imagem(self.x, 5, superficie((296, 82), raio=24), anchor="nw")
+            self.imagem(0, 0, superficie((self.largura, 92), FUNDO, raio=30, pressionado=True), anchor="nw")
+            self.face_item = self.imagem(self.x, 5, superficie((self.segmento, 82), raio=24), anchor="nw")
             self.rotulos, self.icones = [], []
             for i, (_, titulo, _, _) in enumerate(MODOS):
                 total = self.fonte.measure(titulo) + 38
-                x = 160 + i * 296 - total / 2
-                self.icones.append(self.imagem(x + 12, 46, icone(("onda", "spotify", "video")[i], SECUNDARIO)))
+                x = self.margem + (i + 0.5) * self.segmento - total / 2
+                self.icones.append(self.imagem(x + 12, 46, icone(self.simbolos[i], SECUNDARIO)))
                 self.rotulos.append(self.create_text(x + 38, 46, text=titulo, anchor="w",
                                                       font=self.fonte, fill=SECUNDARIO))
             self.foco_item = self.create_oval(0, 72, 6, 75, outline="", state="hidden")
         face = misturar("#f8f8f5", self.cor, 0.035)
         self.coords(self.face_item, self.x, 5)
-        self.alterar_imagem(self.face_item, superficie((296, 82), face, raio=24))
+        self.alterar_imagem(self.face_item, superficie((self.segmento, 82), face, raio=24))
         for i, (_, titulo, _, _) in enumerate(MODOS):
             selecionado = i == self.indice
             sobre = self.hover_valores[i]
             tinta = self.cor if selecionado else SECUNDARIO
-            self.alterar_imagem(self.icones[i], icone(("onda", "spotify", "video")[i], tinta, 24))
+            self.alterar_imagem(self.icones[i], icone(self.simbolos[i], tinta, 24))
             self.itemconfigure(self.rotulos[i], fill=misturar(TEXTO if selecionado else SECUNDARIO, self.cor, sobre))
-        self.coords(self.foco_item, 157 + 296 * self.indice, 72, 163 + 296 * self.indice, 75)
+        centro = self.margem + (self.indice + 0.5) * self.segmento
+        self.coords(self.foco_item, centro - 3, 72, centro + 3, 75)
         self.itemconfigure(self.foco_item, fill=self.cor, state="normal" if self.focus_get() is self else "hidden")
 
 
@@ -1251,6 +1261,9 @@ class Janela(tk.Tk):
                                   fill=SECUNDARIO)
         self.canvas.itemconfigure(self.status_ponto, fill=self.cor_modo if conectada else "#89929f")
         self.midia = dados
+        status_clipe = (dados.get("status_clipe", "") if self.config_usuario["modo"] == "clipe"
+                        and not self.config_usuario.get("gaming") and conectada else "")
+        self.canvas.itemconfigure(self.modo_dica, text=status_clipe)
         if not self.fundo_convertendo:
             if dados.get("erro_fundo"):
                 self.fundo_status = (dados["erro_fundo"], "#966022")

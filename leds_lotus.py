@@ -6,7 +6,6 @@ adaptador Bluetooth quando o usuário ativa a opção; não executa os .cmd.
 import colorsys
 import datetime
 import json
-import math
 import re
 import shutil
 import socket
@@ -15,9 +14,11 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from transicao_leds import CHAVE_PASSO, peso_transicao, referencia_rgb
 
 RAIZ = Path(__file__).resolve().parent
 INTERVALO = 0.2
+INTERVALO_SINCRONIA = 0.05
 FADE = 1.2
 ENDERECO = ("127.0.0.1", 4048)
 
@@ -119,6 +120,7 @@ class LotusLantern:
         self._sequencia = 0
         self._status = "Desligada"
         self._chave_cor = None
+        self._transicao_pc = None
         self._base_cor = (142, 0, 218)
         self._cor_idle = (142, 0, 218)
         self._cor_original = None
@@ -163,6 +165,7 @@ class LotusLantern:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._chave_cor = None
+        self._transicao_pc = None
         self._endereco_selecionado = None
         self._ultimo_envio = 0.0
         self.log(f"lotus: ponte BLE iniciada; endereço={uuid}; OpenRGB preservado")
@@ -221,8 +224,9 @@ class LotusLantern:
             self._socket.close()
             self._socket = None
 
-    def _cor_alvo(self):
-        config = self.controles.config
+    def _cor_alvo(self, referencia=None, config=None):
+        if config is None:
+            config = self.controles.config
         if not config["tela_ligada"]:
             # O controle principal prevalece também sobre o brilho manual
             # da fita. As preferências dela ficam preservadas para a volta.
@@ -233,16 +237,10 @@ class LotusLantern:
             if brilho is None:
                 brilho = self.brilho_para(datetime.datetime.now())
             return tuple(round(c * brilho / 100) for c in cor)
-        snap = dict(self.estado)
-        midia = snap
-        if snap.get("modo_exibicao") == "spotify" and snap.get("musica") is None:
-            midia = snap.get("ultima_midia") or snap
-        album_ativo = (
-            snap.get("modo_exibicao") != "video" and midia.get("musica") is not None
-        )
-        cor = (midia.get("cor_viva") or midia.get("cor_capa")) if album_ativo else self._cor_idle
-        cor = tuple((cor or self._cor_idle)[:3])
-        if album_ativo:
+        if referencia is None:
+            referencia = referencia_rgb(dict(self.estado), self.brilho_para(datetime.datetime.now()))
+        cor = referencia.capa or self._cor_idle
+        if referencia.capa is not None:
             if self._calibrar_pc is None:
                 try:
                     # Reutiliza somente a função de cor; não conecta ao SDK
@@ -262,9 +260,34 @@ class LotusLantern:
             cor = self._cor_fita
         brilho = config.get("lotus_brilho")
         if brilho is None:
-            brilho = self.brilho_para(datetime.datetime.now())
+            brilho = referencia.brilho
         brilho = max(0, min(100, brilho)) / 100
         return tuple(int(max(0, min(255, c)) * brilho) for c in cor)
+
+    def _cor_transicao(self, agora, config):
+        manual = config.get("lotus_modo") == "manual"
+        passo = self.estado.get(CHAVE_PASSO) if not manual and config["tela_ligada"] else None
+        alvo = self._cor_alvo(passo.referencia if passo is not None else None, config)
+        if passo is not None and passo.transicao is not None and (
+                passo.peso < 1 or passo.transicao is self._transicao_pc):
+            if passo.transicao is not self._transicao_pc:
+                self._inicio_cor = self._base_cor
+                self._transicao_pc = passo.transicao
+            self._chave_cor = alvo
+            if passo.peso == 1:
+                self._transicao_pc = None
+                self._inicio_cor = alvo
+                self._inicio_fade = agora
+            return tuple(int(a + (b - a) * passo.peso) for a, b in zip(self._inicio_cor, alvo))
+
+        # Manual e ausência do OpenRGB conservam o fade local da fita.
+        if alvo != self._chave_cor or self._transicao_pc is not None:
+            self._inicio_cor = self._base_cor if self._chave_cor is not None else alvo
+            self._chave_cor, self._inicio_fade = alvo, agora
+            self._transicao_pc = None
+        duracao = 0.3 if manual else FADE
+        peso = peso_transicao(min(1.0, (agora - self._inicio_fade) / duracao))
+        return tuple(round(a + (b - a) * peso) for a, b in zip(self._inicio_cor, alvo))
 
     def _enviar(self, cor):
         self._sequencia = self._sequencia % 15 + 1
@@ -283,6 +306,7 @@ class LotusLantern:
                 ativa = config.get("lotus_ativo", False)
                 pasta = config.get("lotus_pasta")
                 agora = time.monotonic()
+                intervalo = INTERVALO
                 try:
                     if not ativa:
                         if self.proc is not None:
@@ -309,14 +333,9 @@ class LotusLantern:
                         if self.proc is not None and (self.estado.get("midia_pronta", False)
                                                       or config.get("lotus_modo") == "manual"
                                                       or not config["tela_ligada"]):
-                            alvo = self._cor_alvo()
-                            if alvo != self._chave_cor:
-                                self._inicio_cor = self._base_cor if self._chave_cor is not None else alvo
-                                self._chave_cor, self._inicio_fade = alvo, agora
-                            duracao = 0.3 if config.get("lotus_modo") == "manual" else FADE
-                            t = min(1.0, (agora - self._inicio_fade) / duracao)
-                            peso = (1 - math.cos(t * math.pi)) / 2
-                            cor = tuple(round(a + (b - a) * peso) for a, b in zip(self._inicio_cor, alvo))
+                            cor = self._cor_transicao(agora, config)
+                            if config.get("lotus_modo") != "manual" and CHAVE_PASSO in self.estado:
+                                intervalo = INTERVALO_SINCRONIA
                             # Keepalive impede que o bridge desconecte por inatividade.
                             if cor != self._base_cor or agora - self._ultimo_envio >= 1.0:
                                 self._enviar(cor)
@@ -331,7 +350,7 @@ class LotusLantern:
                         ultima_falha = erro
                     self._fechar()
                     proxima_tentativa = agora + 10.0
-                self.parar.wait(INTERVALO)
+                self.parar.wait(intervalo)
         finally:
             self._fechar()
             self.status("Desligada")

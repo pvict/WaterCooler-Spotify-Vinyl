@@ -25,11 +25,11 @@ import json
 import os
 import threading
 import time
-import math
 
 from openrgb import OpenRGBClient
 from openrgb.utils import RGBColor
 from registro_leds import RegistroLEDs
+from transicao_leds import CHAVE_PASSO, PassoRGB, peso_transicao, referencia_rgb
 
 _ultima_cor_debug = None
 
@@ -208,51 +208,35 @@ def _zonas(devs):
 
 def cores_alvo(estado, brilho, zonas, perfil):
     """Cores desejadas por LED de cada zona, chave = 'dispositivo|zona'."""
-    fator = max(0, min(100, brilho)) / 100
-    modo = estado.get("modo_exibicao", "dinamico")
-    midia = estado
-    if modo == "spotify" and estado.get("musica") is None:
-        midia = estado.get("ultima_midia") or estado
-    tocando = modo != "video" and midia.get("musica") is not None
-    
-    # Se não está tocando, evita completamente o processamento da capa e usa a cor padrão/ociosa de forma limpa
-    if not tocando:
-        alvo = {}
-        for chave, _d, z in zonas:
-            n = len(z.leds)
-            base = perfil.get(chave)
-            if base is None or len(base) != n:
-                base = [COR_PADRAO] * n
-            alvo[chave] = [_escalar(c, fator) for c in base]
-        return alvo
+    referencia = referencia_rgb(dict(estado), brilho)
+    return _cores_por_zona(referencia, zonas, perfil)
 
-    cor = midia.get("cor_viva") or midia["cor_capa"]
-    album = realcar(cor)
+
+def _cores_por_zona(referencia, zonas, perfil):
+    fator = max(0, min(100, referencia.brilho)) / 100
+    cor_unica = realcar(referencia.capa) if referencia.capa is not None else None
     alvo = {}
     for chave, _d, z in zonas:
         n = len(z.leds)
-        base = [album] * n
+        base = [cor_unica] * n if cor_unica is not None else perfil.get(chave)
+        if base is None or len(base) != n:
+            base = [COR_PADRAO] * n
         alvo[chave] = [_escalar(c, fator) for c in base]
     return alvo
 
 
-def _suavizar_fator(t):
-    """Curva ease-in-out (senoidal) para suavizar início e fim da transição."""
-    return (1 - math.cos(t * math.pi)) / 2
-
-
-def _misturar(a, b, t):
-    t_suave = _suavizar_fator(t)
+def _misturar(a, b, peso):
     return {
         k: [
-            tuple(int(x + (y - x) * t_suave) for x, y in zip(ca, cb))
+            tuple(int(x + (y - x) * peso) for x, y in zip(ca, cb))
             for ca, cb in zip(a[k], b[k])
         ]
         for k in b
     }
 
 
-def _enviar_etapa(zonas, cores, escrito, etapa, passos, parar, log, registro=None):
+def _enviar_etapa(zonas, cores, escrito, etapa, passos, parar, log, registro=None,
+                  ao_primeiro_envio=None):
     """UPDATE_SINGLE_LED espaçados; evita o lote interno do driver Polychrome v2."""
     dispositivos = []
     for _chave_zona, dev, _zona in zonas:
@@ -312,6 +296,9 @@ def _enviar_etapa(zonas, cores, escrito, etapa, passos, parar, log, registro=Non
                     # A resposta continua sendo do SDK, não da cor física.
                     led.set_color(RGBColor(*cor))
                     envio["resultado"] = "retorno_sdk"
+                    if ao_primeiro_envio is not None:
+                        ao_primeiro_envio()
+                        ao_primeiro_envio = None
                 except Exception as exc:
                     envio["erro"] = f"{type(exc).__name__}: {exc}"
                     resultado_etapa = "erro_sdk"
@@ -332,6 +319,8 @@ def _enviar_etapa(zonas, cores, escrito, etapa, passos, parar, log, registro=Non
         for chave, _zona in selecionadas:
             escrito[chave] = list(cores[chave])
         log(f"openrgb: envios espaçados concluídos etapa={etapa}/{passos} duração={time.monotonic() - inicio_envio:.3f}s (SDK; sem confirmação física)")
+    if ao_primeiro_envio is not None:  # A quantização pode repetir a cor de uma etapa.
+        ao_primeiro_envio()
     return False
 
 
@@ -407,6 +396,11 @@ def _laco(estado, brilho_para, parar, log, registro=None):
     avisou_espera_midia = False
     liberou_por_timeout = False
     ultimo_estado_registrado = None
+
+    def ler_alvo():
+        referencia = referencia_rgb(dict(estado), brilho_para(datetime.datetime.now()))
+        return referencia, _cores_por_zona(referencia, zonas, perfil)
+
     while not parar.is_set():
         if registro is not None:
             api = estado.get("spotify_reproducao") or {}
@@ -457,39 +451,50 @@ def _laco(estado, brilho_para, parar, log, registro=None):
                 escrito = {}
                 ultimo_erro = ""
 
-            novo = cores_alvo(estado, brilho_para(datetime.datetime.now()), zonas, perfil)
-            
+            referencia, novo = ler_alvo()
             if novo != atual:
-                # Se já tínhamos uma cor sendo exibida, a transição parte da cor ATUAL exata de onde parou
                 inicio = atual if atual is not None else novo
                 passos = 1 if atual is None else FADE_PASSOS
+                transicao = object() if passos > 1 else None
                 log(f"openrgb diagnóstico: início fade passos={passos} musica={estado.get('musica')!r} cor_capa={estado.get('cor_capa')} cor_viva={estado.get('cor_viva')} alvo={ {k: v[0] if v else None for k, v in novo.items()} }")
                 if registro is not None:
                     registro.registrar("inicio_fade", passos=passos,
                                        musica_windows=estado.get("musica"),
                                        spotify=estado.get("spotify_reproducao"),
                                        alvo={k: v[0] if v else None for k, v in novo.items()})
-                
                 for i in range(1, passos + 1):
-                    # Se a música mudar durante o fade, atualiza o alvo suavemente sem quebrar
-                    alvo_momento = cores_alvo(estado, brilho_para(datetime.datetime.now()), zonas, perfil)
+                    referencia, alvo_momento = ler_alvo()
                     if alvo_momento != novo:
                         log(f"openrgb diagnóstico: alvo mudou durante fade etapa={i}/{passos} anterior={ {k: v[0] if v else None for k, v in novo.items()} } novo={ {k: v[0] if v else None for k, v in alvo_momento.items()} }")
-                        novo = alvo_momento
+                        break  # A próxima transição começa da última cor enviada.
 
-                    cores = _misturar(inicio, novo, i / passos)
-                    if _enviar_etapa(zonas, cores, escrito, i, passos, parar, log, registro):
+                    peso = peso_transicao(i / passos)
+                    cores = _misturar(inicio, novo, peso)
+
+                    def publicar_passo():
+                        estado[CHAVE_PASSO] = PassoRGB(referencia, transicao, peso)
+
+                    if _enviar_etapa(zonas, cores, escrito, i, passos, parar, log, registro,
+                                     publicar_passo if zonas else None):
                         return
+                    atual = cores
 
                     if i < passos and parar.wait(FADE_INTERVALO):
                         return
-                
-                atual = novo
-                log("openrgb diagnóstico: fade concluído (envios SDK; sem confirmação física dos LEDs)")
-                if registro is not None:
-                    registro.registrar("fim_fade_sdk", passos=passos)
+                else:
+                    log("openrgb diagnóstico: fade concluído (envios SDK; sem confirmação física dos LEDs)")
+                    if registro is not None:
+                        registro.registrar("fim_fade_sdk", passos=passos)
+                continue
+
+            if zonas:
+                passo = estado.get(CHAVE_PASSO)
+                # A calibração ou o brilho podem manter o mesmo RGB na placa.
+                if passo is None or passo.referencia != referencia or passo.peso != 1:
+                    estado[CHAVE_PASSO] = PassoRGB(referencia, None, 1.0)
 
         except Exception as exc:
+            estado.pop(CHAVE_PASSO, None)
             if registro is not None:
                 registro.registrar("erro_sdk", tipo=type(exc).__name__, erro=str(exc))
             if str(exc) != ultimo_erro:
@@ -512,6 +517,7 @@ def iniciar(estado, brilho_para, parar, log):
         try:
             _laco(estado, brilho_para, parar, log, registro)
         finally:
+            estado.pop(CHAVE_PASSO, None)
             registro.fechar()
 
     t = threading.Thread(

@@ -35,6 +35,7 @@ import animacao_capa
 from spotify_playlist import SpotifyPlaylistWatcher
 from controle_interface import Controles, iniciar_ponte, reservar_execucao, liberar_execucao
 from fundo_usuario import FundoOcioso
+from modo_clipe import FonteClipe
 from modo_gaming import PreparadorGaming, PipelinePreparado, FPS_GAMING
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -718,7 +719,8 @@ class Painel:
     Enquanto o painel segue na tela depois da pausa, ele mostra a última faixa, com o disco
     desacelerando até parar."""
 
-    def __init__(self, fundo_musica, fundo_ocioso, brilho_inicial):
+    def __init__(self, fundo_musica, fundo_ocioso, brilho_inicial, clipe=None):
+        self.clipe = clipe
         self.fundo_musica = fundo_musica
         self.fundo_ocioso = fundo_ocioso
         self.pipe = None
@@ -1119,13 +1121,18 @@ class Painel:
 
         snap = dict(estado)
         modo = controles.config["modo"]
+        if modo == "clipe" and self.clipe is not None:
+            quadro = self.clipe.quadro(snap)
+            if quadro is not None:
+                self._publicar_visual(False)
+                return quadro
         if modo != "dinamico":
             self._retomar_giro_dinamico = False
             self._capa_retomada_dinamica = None
             self._cor_retomada_dinamica = None
         if modo == "video":
             snap.update(musica=None, capa=None, tocando=False)
-        elif modo == "spotify" and snap.get("musica") is None:
+        elif modo in ("spotify", "clipe") and snap.get("musica") is None:
             snap.update(snap.get("ultima_midia") or {
                 "musica": ("Pronto para tocar", "Abra o Spotify"), "capa": None,
             })
@@ -1179,7 +1186,7 @@ class Painel:
                 self._retomar_giro_dinamico = True
                 self._capa_retomada_dinamica = self._capa_girada()
                 self._cor_retomada_dinamica = self.cor
-        mostrar = (modo == "spotify" or tocando
+        mostrar = (modo in ("spotify", "clipe") or tocando
                    or (modo != "video" and self.t_pausa is not None and agora - self.t_pausa < ATRASO_OCIOSO))
         alvo = 1.0 if mostrar else 0.0
         if self.p < alvo:
@@ -1188,7 +1195,7 @@ class Painel:
             self.p = max(alvo, self.p - dt / FADE_SAI)
         ps = _suave(self.p)
 
-        if (self.p <= 0.0 and not tocando) or (modo != "spotify" and not tocando and self.titulo is None):
+        if (self.p <= 0.0 and not tocando) or (modo not in ("spotify", "clipe") and not tocando and self.titulo is None):
             self._zerar()
             self._publicar_visual(False)
             self.estava_tocando = tocando
@@ -1222,7 +1229,7 @@ class Painel:
         return quadro
 
 
-def sessao_usb(gaming):
+def sessao_usb(gaming, clipe):
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg não encontrado no PATH")
     dev = libusb_package.find(idVendor=0x1CBE, idProduct=0x21)
@@ -1285,7 +1292,7 @@ def sessao_usb(gaming):
                     else:
                         fundo_ocioso = ao_vivo.FundoDecoder(
                             ARQUIVO_BACKGROUND, FPS, log=log, nome="fundo ocioso")
-                    painel = Painel(fundo_musica, fundo_ocioso, brilho)
+                    painel = Painel(fundo_musica, fundo_ocioso, brilho, clipe)
                     pipe = ao_vivo.PipelineAoVivo(
                         dev, painel.quadro, fps=FPS, kbps=KBPS, parar=parar_sessao, log=log)
                     painel.pipe = pipe
@@ -1334,10 +1341,10 @@ def sessao_usb(gaming):
             pass
 
 
-def transmitir(gaming):
+def transmitir(gaming, clipe):
     while not parar.is_set():
         try:
-            sessao_usb(gaming)
+            sessao_usb(gaming, clipe)
         except Exception as exc:
             estado["erro_interface"] = str(exc)
             log(f"erro: {exc}")
@@ -1450,7 +1457,7 @@ async def vigiar_spotify():
                             sessao = s
                             break
 
-                if sessao is None and (not ESCONDER_PAUSADO or controles.modo_efetivo() == "spotify"):
+                if sessao is None and (not ESCONDER_PAUSADO or controles.modo_efetivo() in ("spotify", "clipe")):
                     for s in sessoes:
                         if "spotify" in s.source_app_user_model_id.lower():
                             sessao = s
@@ -1459,7 +1466,7 @@ async def vigiar_spotify():
                 observar_sessao(sessao)
                 tocando = sessao is not None and int(sessao.get_playback_info().playback_status) == 4
 
-                if sessao is None or (ESCONDER_PAUSADO and not tocando and controles.modo_efetivo() != "spotify"):
+                if sessao is None or (ESCONDER_PAUSADO and not tocando and controles.modo_efetivo() not in ("spotify", "clipe")):
                     estado.update(musica=None, capa=None, cor_capa=(30, 215, 96, 255),
                                   cor_viva=(30, 215, 96, 255), tocando=False, midia_pronta=True,
                                   pedido_capa_album=None, capa_album_api=None)
@@ -1598,7 +1605,13 @@ def main():
     t_vol = threading.Thread(target=_laco_volume, daemon=True)
     t_vol.start()
 
-    t = threading.Thread(target=transmitir, args=(gaming,), daemon=True)
+    clipe = FonteClipe(lambda: dict(estado),
+                      lambda: (not parar.is_set() and estado.get("tela_conectada")
+                               and controles.modo_efetivo() == "clipe"
+                               and controles.config["tela_ligada"]),
+                      lambda texto: estado.update(status_clipe=texto), log)
+    clipe.iniciar()
+    t = threading.Thread(target=transmitir, args=(gaming, clipe), daemon=True)
     t.start()
     
     try:
@@ -1606,6 +1619,7 @@ def main():
     except KeyboardInterrupt:
         pass
     parar.set()
+    clipe.fechar()
     lotus.fechar()
     gaming.fechar()
     watcher_playlist.fechar()

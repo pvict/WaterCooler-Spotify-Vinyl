@@ -73,7 +73,10 @@ Dê dois cliques em **Turing Vinyl.lnk**, na pasta do projeto. Use esse atalho n
 | **Dinâmico** | Vinil enquanto a música toca; vídeo de fundo durante a pausa ou ociosidade. |
 | **Spotify** | O vinil permanece visível; para suavemente e a capa encolhe ao pausar. |
 | **Vídeo** | Apenas o vídeo de fundo. |
+| **Clipe** | Procura a faixa no YouTube e mostra o clipe só na tela USB. O áudio continua no Spotify. |
 | **Gaming** | Repete um fundo preparado a 30 FPS, com menos processamento e sem informações da música. Desative para voltar ao modo escolhido. |
+
+Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` na pasta do projeto. Reabra o app. O modo usa uma integração não oficial com o YouTube. Durante a busca, em pausa ou se o clipe estiver indisponível, a tela mostra o vinil. Clipes com introdução ou edição diferente podem ficar fora de sincronia.
 
 | Controle | Para que serve |
 | --- | --- |
