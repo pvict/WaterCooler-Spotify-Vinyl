@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PIL import Image
@@ -16,7 +17,7 @@ class TestLetrasTela(unittest.TestCase):
                          album="Vento de Vidro", capa_letras=self.capa, pos=1.5,
                          dur=90, t_poll=100, tocando=True, tela_conectada=True)
         self.config = dict(tela.controles.config, modo="spotify", letras_ativas=True,
-                           tela_ligada=True, brilho=100)
+                           tela_ligada=True, brilho=100, gaming=False)
         self.clip_frame = Image.new("RGB", (480, 480), "green")
         self.clipe = Mock()
         self.clipe.quadro.return_value = self.clip_frame
@@ -35,6 +36,10 @@ class TestLetrasTela(unittest.TestCase):
               patch.object(tela.controles, "config", self.config),
               patch.object(tela.time, "monotonic", return_value=tempo)):
             return self.painel.quadro(tempo)
+
+    def usar_composicao_real(self):
+        fundo = SimpleNamespace(proximo=lambda: self.quadro_normal)
+        self.painel = tela.Painel(fundo, fundo, 100, clipe=self.clipe, letras=self.fonte)
 
     def test_spotify_compõe_na_saida_usb_sem_desligar_o_preview_do_vinil(self):
         self.painel.p, self.painel.capa = 1.0, self.capa
@@ -71,14 +76,58 @@ class TestLetrasTela(unittest.TestCase):
         assert self.quadro(100.3) is self.clip_frame
         self.fonte.consultar.assert_called_with(None)
 
-    def test_spotify_sem_letra_ou_sem_capa_mostra_o_quadro_normal(self):
+    def test_clipe_sem_quadro_mostra_letra_ate_o_video_chegar(self):
+        self.usar_composicao_real()
+        self.config["modo"] = "clipe"
+        self.clipe.quadro.return_value = None
+
+        letra = self.quadro(100.7)
+        assert letra.getpixel((0, 0)) == (102, 56, 48)
+        assert (255, 255, 255) in letra.crop((80, 200, 400, 280)).get_flattened_data()
+        assert status_letras_atual(self.config, self.snap) == "exibindo"
+
+        self.clipe.quadro.return_value = self.clip_frame
+        legendado = self.quadro(100.8)
+        topo = (0, 0, 480, 310)
+        assert legendado.crop(topo).tobytes() == self.clip_frame.crop(topo).tobytes()
+        pixels_legenda = legendado.crop((80, 310, 400, 391)).get_flattened_data()
+        assert (255, 255, 255) in pixels_legenda
+        assert (0, 0, 0) in pixels_legenda
+        assert status_letras_atual(self.config, self.snap) == "exibindo"
+
+    def test_letras_aparecem_no_primeiro_quadro_sem_capa(self):
+        self.usar_composicao_real()
+        self.snap["capa_letras"] = None
+
+        imagem = self.quadro(100.7)
+        assert imagem.getpixel((0, 0)) == (10, 10, 20)
+        assert (255, 255, 255) in imagem.crop((80, 200, 400, 280)).get_flattened_data()
+        assert status_letras_atual(self.config, self.snap) == "exibindo"
+
+    def test_letras_sem_capa_nao_usam_a_arte_da_faixa_anterior(self):
+        self.clipe.quadro.return_value = None
+        capa_anterior = Image.new("RGBA", self.capa.size, "red")
+        self.snap.update(capa=capa_anterior, capa_letras=capa_anterior)
+        for modo in ("spotify", "dinamico", "clipe"):
+            with self.subTest(modo=modo):
+                self.usar_composicao_real()
+                self.config["modo"] = modo
+                self.snap.update(musica=("Faixa anterior", "Maré Alta"), capa_letras=capa_anterior)
+                assert self.quadro(100.7).getpixel((0, 0)) == (153, 0, 0)
+
+                self.snap.update(musica=("Farol de Papel", "Maré Alta"), capa_letras=None)
+                imagem = self.quadro(100.8)
+                assert imagem.getpixel((0, 0)) == (10, 10, 20)
+                assert (255, 255, 255) in imagem.crop((80, 200, 400, 280)).get_flattened_data()
+                assert status_letras_atual(self.config, self.snap) == "exibindo"
+
+                self.snap["capa_letras"] = self.capa
+                assert self.quadro(100.9).getpixel((0, 0)) == (102, 56, 48)
+
+    def test_spotify_sem_letra_mostra_o_quadro_normal(self):
         self.fonte.consultar.return_value = ResultadoLetra("buscando")
         assert self.quadro(100.7).tobytes() == self.quadro_normal.tobytes()
         assert status_letras_atual(self.config, self.snap) == "buscando"
-        self.fonte.consultar.return_value = ResultadoLetra("pronta", self.letra)
-        self.snap["capa_letras"] = None
-        assert self.quadro(100.8).tobytes() == self.quadro_normal.tobytes()
-        assert status_letras_atual(self.config, self.snap) == "pronta"
 
     def test_status_de_falha_nao_aparece_em_outra_musica_ou_com_tela_apagada(self):
         self.fonte.consultar.return_value = ResultadoLetra("erro")

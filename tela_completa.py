@@ -1272,10 +1272,10 @@ class Painel:
             return bg
         self.estava_tocando = tocando
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
-        capa_letras = snap.get("capa_letras")
-        if letra is not None and capa_letras is not None and modo in ("spotify", "dinamico"):
+        if letra is not None:
             posicao = posicao_atual(snap, time.monotonic())
-            quadro = self.visual_letras.spotify(capa_letras, letra, posicao)
+            # A capa confirmada é da faixa atual. O painel pode ainda mostrar a anterior.
+            quadro = self.visual_letras.spotify(snap.get("capa_letras"), letra, posicao)
             estado["status_letras"] = (faixa, modo, "exibindo")
             return quadro
         estado["status_letras"] = status_letras

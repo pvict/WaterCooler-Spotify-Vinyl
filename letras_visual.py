@@ -6,16 +6,21 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
+from texto_emoji import desenhar_texto, medir_texto, unidades
+
 
 _LADO = 480
 _CENTRO = _LADO // 2
 _PASTA = Path(__file__).resolve().parent
-_TOPO_LETRAS, _BASE_LETRAS = 82, 398
-_MARGEM_LETRAS = 80
-_ENTRELINHA = 38
-_ESPACO_VERSOS = 9
-_TEMPO_ROLAGEM = 0.28
-_FADE_BORDAS = 35
+_RAIO_LETRAS = 222
+_TOPO_LETRAS, _BASE_LETRAS = _CENTRO - _RAIO_LETRAS, _CENTRO + _RAIO_LETRAS + 1
+_LARGURA_LETRAS = 392
+_ENTRELINHA = 48
+_ESPACO_VERSOS = 12
+_ESCALA_CONTEXTO = 0.67
+_ALFA_CONTEXTO = 142
+_TEMPO_ROLAGEM = 0.32
+_FADE_BORDAS = 24
 
 
 @lru_cache(maxsize=4)
@@ -37,6 +42,8 @@ def _fonte(tamanho):
 
 
 def fundo_da_letra(capa):
+    if capa is None:
+        return Image.new("RGB", (_LADO, _LADO), (10, 10, 20))
     # putalpha() na capa do vinil mantém o RGB do recorte quadrado completo.
     quadrada = ImageOps.fit(capa.convert("RGB"), (_LADO, _LADO), Image.Resampling.LANCZOS)
     borrada = quadrada.filter(ImageFilter.GaussianBlur(23))
@@ -46,33 +53,47 @@ def fundo_da_letra(capa):
 def _linhas(texto, fonte, largura, limite):
     linhas = []
     while texto and len(linhas) < limite:
-        if fonte.getlength(texto) <= largura:
+        if medir_texto(texto, fonte) <= largura:
             linhas.append(texto)
             texto = ""
             break
         ultima = len(linhas) == limite - 1
         sufixo = "…" if ultima else ""
+        grupos = list(unidades(texto))
         fim = 1
-        while fim < len(texto) and fonte.getlength(texto[:fim + 1] + sufixo) <= largura:
+        while (fim < len(grupos)
+               and medir_texto("".join(grupos[:fim + 1]) + sufixo, fonte) <= largura):
             fim += 1
-        espaco = texto.rfind(" ", 0, fim + 1)
-        if espaco > 0 and (not ultima or espaco > fim * 0.7):
-            fim = espaco
-        linhas.append(texto[:fim].rstrip() + sufixo)
-        texto = texto[fim:].lstrip()
+        corte = sum(len(grupo) for grupo in grupos[:fim])
+        espaco = texto.rfind(" ", 0, corte + 1)
+        if espaco > 0 and (not ultima or espaco > corte * 0.7):
+            corte = espaco
+        linhas.append(texto[:corte].rstrip() + sufixo)
+        texto = texto[corte:].lstrip()
     return linhas, not texto
 
 
 @lru_cache(maxsize=256)
-def _mascara_verso(texto):
-    fonte = _fonte(34)
-    largura = _LADO - 2 * _MARGEM_LETRAS
-    linhas, _ = _linhas(texto, fonte, largura - 8, 3)
-    mascara = Image.new("L", (largura, max(1, len(linhas)) * _ENTRELINHA))
-    desenho = ImageDraw.Draw(mascara)
+def _verso_renderizado(texto):
+    fonte = _fonte(42)
+    linhas, _ = _linhas(texto, fonte, _LARGURA_LETRAS - 4, 3)
+    verso = Image.new("RGBA", (_LARGURA_LETRAS, max(1, len(linhas)) * _ENTRELINHA))
     for i, linha in enumerate(linhas):
-        desenho.text((4, i * _ENTRELINHA + 29), linha, font=fonte, fill=255, anchor="ls")
-    return mascara
+        desenhar_texto(verso, (_LARGURA_LETRAS // 2, i * _ENTRELINHA + 38),
+                      linha, fonte, "white", "ms")
+    return verso
+
+
+def _escalar_verso(verso, escala):
+    if escala == 1:
+        return verso
+    tamanho = round(verso.width * escala), round(verso.height * escala)
+    return verso.resize(tamanho, Image.Resampling.BICUBIC)
+
+
+@lru_cache(maxsize=256)
+def _verso_contexto(texto):
+    return _escalar_verso(_verso_renderizado(texto), _ESCALA_CONTEXTO)
 
 
 @lru_cache(maxsize=128)
@@ -84,20 +105,21 @@ def _legenda(texto):
         if completa:
             break
     legenda = Image.new("RGBA", (largura, altura))
-    desenho = ImageDraw.Draw(legenda)
     for i, linha in enumerate(reversed(linhas)):
-        desenho.text((largura // 2, altura - 11 - i * 35), linha, anchor="ms",
-                     font=fonte, fill="white", stroke_width=3, stroke_fill="black")
+        desenhar_texto(legenda, (largura // 2, altura - 11 - i * 35), linha, fonte,
+                       "white", "ms", stroke_width=3, stroke_fill="black")
     return legenda
 
 
 @lru_cache(maxsize=1)
 def _fade_bordas():
-    altura = _BASE_LETRAS - _TOPO_LETRAS
-    mascara = Image.new("L", (1, altura))
-    mascara.putdata([round(255 * min(1, y / _FADE_BORDAS, (altura - 1 - y) / _FADE_BORDAS))
-                     for y in range(altura)])
-    return mascara.resize((_LADO - 2 * _MARGEM_LETRAS, altura))
+    mascara = Image.new("L", (_LADO, _LADO))
+    desenho = ImageDraw.Draw(mascara)
+    for passo in range(1, _FADE_BORDAS + 1):
+        raio = _RAIO_LETRAS - passo
+        desenho.ellipse((_CENTRO - raio, _CENTRO - raio, _CENTRO + raio, _CENTRO + raio),
+                        fill=round(255 * passo / _FADE_BORDAS))
+    return mascara
 
 
 class VisualLetras:
@@ -109,31 +131,43 @@ class VisualLetras:
 
     def spotify(self, capa, letra, posicao):
         indice = letra.indice(posicao)
-        central = max(indice, 0)
-        mascara = _mascara_verso(letra.linhas[central])
-        y = (_LADO - mascara.height) // 2
+        fase = 1.0 if indice >= 0 else 0.0
         if indice > 0:
             decorrido = max(0, posicao - letra.tempos[indice] / 1000)
-            fase = min(1, decorrido / _TEMPO_ROLAGEM)
-            anterior = _mascara_verso(letra.linhas[indice - 1])
-            distancia = (mascara.height + anterior.height) / 2 + _ESPACO_VERSOS
-            y += round(distancia * (1 - fase) ** 3)
-        if capa is not self._capa:
+            fase = 1 - (1 - min(1, decorrido / _TEMPO_ROLAGEM)) ** 3
+        if self._fundo is None or capa is not self._capa:
             self._capa, self._fundo = capa, fundo_da_letra(capa)
             self._visual = None
-        chave = (letra, indice, y)
+        chave = (letra, indice, fase)
         if chave == self._visual:
             return self._quadro
 
+        central = max(indice, 0)
+        texto = letra.linhas[central]
+        centro_y = _CENTRO
+        anterior = None
+        if indice > 0 and fase < 1:
+            anterior = _verso_renderizado(letra.linhas[indice - 1])
+            distancia = (anterior.height + _verso_contexto(texto).height) / 2 + _ESPACO_VERSOS
+            centro_y += distancia * (1 - fase)
+        ativo = (_verso_contexto(texto) if fase == 0 else
+                 _escalar_verso(_verso_renderizado(texto), _ESCALA_CONTEXTO + (1 - _ESCALA_CONTEXTO) * fase))
+        diferenca_alfa = 255 - _ALFA_CONTEXTO
+        topo = centro_y - ativo.height / 2
         quadro = self._fundo.copy()
-        self._colar_verso(quadro, mascara, y, alpha=255 if indice >= 0 else 142)
-        for direcao, borda in ((-1, y), (1, y + mascara.height)):
+        self._colar_verso(quadro, ativo, round(topo), round(_ALFA_CONTEXTO + diferenca_alfa * fase))
+        for direcao, borda in ((-1, topo), (1, topo + ativo.height)):
             i = central + direcao
             while 0 <= i < len(letra.linhas) and _TOPO_LETRAS < borda < _BASE_LETRAS:
-                verso = _mascara_verso(letra.linhas[i])
+                if anterior is not None and i == indice - 1:
+                    verso = _escalar_verso(anterior, 1 - (1 - _ESCALA_CONTEXTO) * fase)
+                    alfa = round(255 - diferenca_alfa * fase)
+                else:
+                    verso = _verso_contexto(letra.linhas[i])
+                    alfa = _ALFA_CONTEXTO
                 linha_y = (borda - _ESPACO_VERSOS - verso.height if direcao < 0
                            else borda + _ESPACO_VERSOS)
-                self._colar_verso(quadro, verso, linha_y, alpha=142)
+                self._colar_verso(quadro, verso, round(linha_y), alfa)
                 borda = linha_y if direcao < 0 else linha_y + verso.height
                 i += direcao
         self._visual, self._quadro = chave, quadro
@@ -146,12 +180,12 @@ class VisualLetras:
             return
         if topo != y or base != y + verso.height:
             verso = verso.crop((0, topo - y, verso.width, base - y))
-        if topo < _TOPO_LETRAS + _FADE_BORDAS or base > _BASE_LETRAS - _FADE_BORDAS:
-            faixa = _fade_bordas().crop((0, topo - _TOPO_LETRAS, verso.width, base - _TOPO_LETRAS))
-            verso = ImageChops.multiply(verso, faixa)
+        x = (_LADO - verso.width) // 2
+        faixa = _fade_bordas().crop((x, topo, x + verso.width, base))
+        mascara = ImageChops.multiply(verso.getchannel("A"), faixa)
         if alpha != 255:
-            verso = verso.point(lambda v: int(v * alpha / 255))
-        quadro.paste("white", (_MARGEM_LETRAS, topo, _MARGEM_LETRAS + verso.width, base), verso)
+            mascara = mascara.point(lambda v: int(v * alpha / 255))
+        quadro.paste(verso, (x, topo), mascara)
 
     def clipe(self, quadro, letra, posicao):
         indice = letra.indice(posicao)
