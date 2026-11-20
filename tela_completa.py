@@ -65,6 +65,13 @@ ESPERA_RECONEXAO = 5
 KBPS_CLIPE = 2800
 KBPS = 5000               # reduz a fila USB mantendo o alvo de 60 FPS
 PLAYLIST_DURACAO = 5.0
+PLAYLIST_ESPERA_INICIAL = 1.0
+PLAYLIST_ESPERA_FINAL = 0.8
+ROTULO_PLAYLIST = "Você está ouvindo"
+MARQUEE_LARGURA = 325
+PLAYLIST_LARGURA = 240
+MARQUEE_MARGEM = 25
+MARQUEE_VELOCIDADE = 35.0
 PROXIMA_ANTECEDENCIA = 22.0
 PROXIMA_DURACAO = 7.0
 PROXIMA_RETORNO_ALBUM = PROXIMA_ANTECEDENCIA - PROXIMA_DURACAO
@@ -265,6 +272,7 @@ _cache_marquee_pos = 0.0
 _cache_marquee_titulo = None
 _cache_marquee_img = None
 _cache_marquee_largura = 0
+_cache_marquee_mascara = None
 
 _cache_halo_cor = None
 _cache_halo_img = None
@@ -381,6 +389,15 @@ def _laco_volume():
             with contextlib.suppress(Exception):
                 enumerador.UnregisterEndpointNotificationCallback(monitor_saida)
         comtypes.CoUninitialize()
+
+
+def percurso_playlist(largura):
+    return max(0.0, largura - (PLAYLIST_LARGURA - 2 * MARQUEE_MARGEM))
+
+
+def deslocamento_playlist(largura, tempo_visivel):
+    percorrido = max(0.0, tempo_visivel - PLAYLIST_ESPERA_INICIAL) * MARQUEE_VELOCIDADE
+    return round(min(percorrido, percurso_playlist(largura))) - MARQUEE_MARGEM
 
 
 def renderizar(snap):
@@ -508,11 +525,14 @@ def renderizar(snap):
                 F_ARTISTA, (200, 200, 200, 255))
             y_titulo += 25
         
-        LARGURA_MAXIMA = 325  
+        aviso_playlist = snap.get("rotulo_aviso") == ROTULO_PLAYLIST
+        largura_janela = PLAYLIST_LARGURA if aviso_playlist else MARQUEE_LARGURA
         titulo_str = titulo or ""
         largura_titulo = d.textlength(titulo_str, font=F_TITULO)
         
-        if largura_titulo <= LARGURA_MAXIMA:
+        cabe_parado = (percurso_playlist(largura_titulo) == 0 if aviso_playlist
+                       else largura_titulo <= largura_janela)
+        if cabe_parado:
             txt(d, cx, y_titulo, titulo_str, F_TITULO, (255, 255, 255, 255))
         else:
             if _cache_marquee_titulo != titulo_str:
@@ -528,31 +548,31 @@ def renderizar(snap):
                 )
                 _cache_marquee_largura = int(d.textlength(titulo_str + "    •    ", font=F_TITULO))
 
-            velocidade = 35.0
             tempo_visual = snap.get("tempo_visual")
             if tempo_visual is None:
                 tempo_visual = time.monotonic()
-            if modo_playlist_texto:
-                inicio_mensagem = snap.get("mensagem_playlist_inicio")
-                if inicio_mensagem is None:
-                    inicio_mensagem = tempo_visual
-                tempo_marquee = max(0.0, tempo_visual - inicio_mensagem)
+            if aviso_playlist:
+                inicio_leitura = snap.get("inicio_leitura_texto")
+                tempo_visivel = tempo_visual - inicio_leitura if inicio_leitura is not None else 0.0
+                deslocamento_int = deslocamento_playlist(largura_titulo, tempo_visivel)
             else:
-                tempo_marquee = tempo_visual
-            deslocamento_int = int((tempo_marquee * velocidade) % _cache_marquee_largura)
+                inicio_mensagem = snap.get("mensagem_playlist_inicio") if modo_playlist_texto else None
+                tempo_marquee = (max(0.0, tempo_visual - inicio_mensagem) if inicio_mensagem is not None
+                                 else 0.0 if modo_playlist_texto else tempo_visual)
+                deslocamento_int = int((tempo_marquee * MARQUEE_VELOCIDADE) % _cache_marquee_largura)
             
-            janela = _cache_marquee_img.crop((deslocamento_int, 0, deslocamento_int + LARGURA_MAXIMA, 60))
+            janela = _cache_marquee_img.crop((deslocamento_int, 0, deslocamento_int + largura_janela, 60))
             
             # --- MÁSCARA DE FADE NAS EXTREMIDADES ---
             global _cache_marquee_mascara
-            if "_cache_marquee_mascara" not in globals() or globals()["_cache_marquee_mascara"] is None:
-                mascara = Image.new("L", (LARGURA_MAXIMA, 60), 255)
+            if _cache_marquee_mascara is None or _cache_marquee_mascara.width != largura_janela:
+                mascara = Image.new("L", (largura_janela, 60), 255)
                 d_mask = ImageDraw.Draw(mascara)
-                fade_w = 25  # Largura da zona de transição nas pontas (em pixels)
+                fade_w = MARQUEE_MARGEM
                 for x in range(fade_w):
                     alpha = int(255 * (x / fade_w))
                     d_mask.line([(x, 0), (x, 60)], fill=alpha)
-                    d_mask.line([(LARGURA_MAXIMA - 1 - x, 0), (LARGURA_MAXIMA - 1 - x, 60)], fill=alpha)
+                    d_mask.line([(largura_janela - 1 - x, 0), (largura_janela - 1 - x, 60)], fill=alpha)
                 _cache_marquee_mascara = mascara
 
             # Aplica o gradiente alfa de forma otimizada usando ImageChops
@@ -561,7 +581,7 @@ def renderizar(snap):
             a_fade = ImageChops.multiply(a, _cache_marquee_mascara)
             janela = Image.merge("RGBA", (r, g, b, a_fade))
             
-            x_pos = cx - (LARGURA_MAXIMA // 2)
+            x_pos = cx - (largura_janela // 2)
             img.alpha_composite(janela, (x_pos, int(y_titulo)))
             
         if artista and not modo_playlist_texto:
@@ -720,8 +740,9 @@ class Painel:
     Enquanto o painel segue na tela depois da pausa, ele mostra a última faixa, com o disco
     desacelerando até parar."""
 
-    def __init__(self, fundo_musica, fundo_ocioso, brilho_inicial, clipe=None):
+    def __init__(self, fundo_musica, fundo_ocioso, brilho_inicial, clipe=None, fps=FPS):
         self.clipe = clipe
+        self.fps = fps
         self.fundo_musica = fundo_musica
         self.fundo_ocioso = fundo_ocioso
         self.pipe = None
@@ -777,6 +798,7 @@ class Painel:
         self.rotulo_aviso = None
         self.rotulo_aviso_alvo = None
         self.t_texto = None     # início da animação de troca de texto
+        self._inicio_leitura_texto = None
         self.angulo = 0.0
         self.vel = 0.0
         self._v_alvo = None
@@ -809,7 +831,7 @@ class Painel:
     def _fundo(self, ps):
         inicio_fundo = time.perf_counter()
         def ler(dec):
-            if dec is self.fundo_musica and controles.config["modo"] in ("spotify", "dinamico"):
+            if dec is self.fundo_musica and controles.config["modo"] in ("spotify", "dinamico", "clipe"):
                 # Dois quadros vizinhos: interpola a fração durante a frenagem,
                 # em vez de alternar entre congelar e saltar um quadro inteiro.
                 # No modo dinâmico, mantém a mesma parada suave enquanto o
@@ -821,7 +843,7 @@ class Painel:
                 # O pipeline chama uma vez por quadro codificado. Em velocidade
                 # plena avança exatamente um quadro, sem erro acumulado do float.
                 avanco = (1.0 if self._dt_fundo > 0 else 0.0) if velocidade_relativa >= 0.999 else (
-                    velocidade_relativa * FPS * self._dt_fundo)
+                    velocidade_relativa * self.fps * self._dt_fundo)
                 self._fase_fundo_vinil += avanco
                 while self._fase_fundo_vinil >= 1.0:
                     self._fase_fundo_vinil -= 1.0
@@ -924,7 +946,7 @@ class Painel:
         if musica is not None or restaurar_pausado:
             # Texto da faixa e aviso da playlist compartilham a mesma animação.
             rotulo_alvo = "A seguir" if proxima else (
-                "Você está ouvindo" if snap.get("mensagem_playlist") else None)
+                ROTULO_PLAYLIST if snap.get("mensagem_playlist") else None)
             modo_playlist_alvo = rotulo_alvo is not None
             texto_alvo = (
                 (proxima["nome"], "") if proxima else
@@ -934,6 +956,7 @@ class Painel:
                 self.titulo = self.titulo_alvo = texto_alvo
                 self.modo_playlist_texto = self.modo_playlist_texto_alvo = modo_playlist_alvo
                 self.rotulo_aviso = self.rotulo_aviso_alvo = rotulo_alvo
+                self._inicio_leitura_texto = agora
             elif (texto_alvo != self.titulo_alvo
                   or rotulo_alvo != self.rotulo_aviso_alvo):
                 self.titulo_alvo = texto_alvo
@@ -1008,6 +1031,7 @@ class Painel:
                 self.titulo = self.titulo_alvo
                 self.modo_playlist_texto = self.modo_playlist_texto_alvo
                 self.rotulo_aviso = self.rotulo_aviso_alvo
+                self._inicio_leitura_texto = self.t_texto + TEXTO_SAI + TEXTO_ENTRA
                 u = (t - TEXTO_SAI) / TEXTO_ENTRA
                 if u >= 1:
                     self.t_texto = None
@@ -1040,6 +1064,7 @@ class Painel:
                     volume_visual=self.volume_anim,
                     modo_playlist_texto=self.modo_playlist_texto,
                     rotulo_aviso=self.rotulo_aviso, tempo_visual=agora,
+                    inicio_leitura_texto=self._inicio_leitura_texto,
                     escala_capa=self._escala_capa, progresso_alpha=self._alfa_progresso,
                     glow_alpha=self._pausa.glow,
                     progresso_preenchimento=self._pausa.preenchimento)
@@ -1108,6 +1133,17 @@ class Painel:
         snap["mostrar_proxima"] = mostrar
         return valida
 
+    def _iniciar_aviso_playlist(self, nome, agora):
+        largura = F_TITULO.getlength(nome or "")
+        duracao = PLAYLIST_DURACAO
+        if percurso_playlist(largura) > 0:
+            tempo_leitura = (PLAYLIST_ESPERA_INICIAL + percurso_playlist(largura) / MARQUEE_VELOCIDADE
+                             + PLAYLIST_ESPERA_FINAL)
+            duracao = max(duracao, TEXTO_SAI + TEXTO_ENTRA + tempo_leitura)
+        self._mensagem_playlist_ate = agora + duracao
+        self._inicio_mensagem_playlist = agora
+        self._proxima_mensagem_playlist = agora + max(60.0, duracao + 1.0)
+
     def quadro(self, agora):
         self._diag_tempos = {"fundo_ms": 0.0, "animacao_ms": 0.0,
                              "desenhar_ms": 0.0, "compor_ms": 0.0,
@@ -1147,18 +1183,14 @@ class Painel:
             # Mudança detectada pelo monitor Spotify: anuncia antes da capa do álbum.
             self._playlist_evento_visto = evento_playlist
             self._playlist_uri_timer = uri_playlist
-            self._mensagem_playlist_ate = agora + PLAYLIST_DURACAO
-            self._inicio_mensagem_playlist = agora
-            self._proxima_mensagem_playlist = agora + 60.0
+            self._iniciar_aviso_playlist(snap.get("playlist_nome"), agora)
         elif uri_playlist != self._playlist_uri_timer:
             self._playlist_uri_timer = uri_playlist
             self._proxima_mensagem_playlist = agora + 60.0 if uri_playlist else None
             self._mensagem_playlist_ate = 0.0
             self._inicio_mensagem_playlist = None
         elif uri_playlist and self._proxima_mensagem_playlist is not None and agora >= self._proxima_mensagem_playlist:
-            self._mensagem_playlist_ate = agora + PLAYLIST_DURACAO
-            self._inicio_mensagem_playlist = agora
-            self._proxima_mensagem_playlist = agora + 60.0
+            self._iniciar_aviso_playlist(snap.get("playlist_nome"), agora)
         if reservar_final:
             # A seguir tem prioridade; adia a playlist para evitar avisos seguidos.
             self._mensagem_playlist_ate = 0.0
@@ -1295,7 +1327,7 @@ def sessao_usb(gaming, clipe):
                     else:
                         fundo_ocioso = ao_vivo.FundoDecoder(
                             ARQUIVO_BACKGROUND, fps_atual, log=log, nome="fundo ocioso")
-                    painel = Painel(fundo_musica, fundo_ocioso, brilho, clipe)
+                    painel = Painel(fundo_musica, fundo_ocioso, brilho, clipe, fps=fps_atual)
                     pipe = ao_vivo.PipelineAoVivo(
                         dev, painel.quadro, fps=fps_atual, kbps=kbps_atual, parar=parar_sessao, log=log)
                     painel.pipe = pipe
