@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -469,6 +470,68 @@ class ModoClipeTest(unittest.TestCase):
              patch.object(fonte, "_carregar_clipe", side_effect=RuntimeError("YouTube")) as carregar:
             fonte._rodar()
         self.assertEqual(carregar.call_count, 2)
+
+    def test_reutiliza_clipe_preparado_so_para_a_faixa_correta(self):
+        atual = ("Sol", "Cantora")
+        proxima = {"reproducao_id": 1, "uri": "spotify:track:lua",
+                   "musica": ("Lua", "Cantora, Convidado"), "artistas": ("Cantora", "Convidado"),
+                   "album": "Noite", "dur": 200}
+        snap = {"musica": atual, "tocando": True, "reproducao_id": 1, "proximo_clipe": proxima}
+        mensagens = []
+        fonte = FonteClipe(lambda: dict(snap), lambda: True, mensagens.append, lambda _: None)
+
+        def carregar(prevista, _chave, pasta, *, ativo, status):
+            self.assertEqual(prevista["musica"], proxima["musica"])
+            self.assertTrue(ativo())
+            self.assertIsNone(status)
+            arquivo = pasta / "clipe.aaaaaaaaaaa.mp4"
+            arquivo.write_bytes(b"video")
+            return arquivo, True
+
+        with TemporaryDirectory() as diretorio, ThreadPoolExecutor(max_workers=1) as executor:
+            pasta = Path(diretorio)
+            previa = pasta / "proximo"
+            previa.mkdir()
+            with patch.object(fonte, "_selecionar_clipe", side_effect=carregar):
+                fonte._agendar_preparo(snap, previa, executor)
+                fonte._preparo.futuro.result(timeout=3)
+                snap.update(musica=("Lua - Ao Vivo", "Cantora"), album="Noite", dur=200,
+                            reproducao_id=2, proximo_clipe=None)
+                self.assertIsNone(fonte._usar_preparo(snap, (snap["musica"], 2), pasta))
+                snap["musica"] = ("Lua", "Cantora")
+                arquivo = fonte._usar_preparo(snap, (snap["musica"], 2), pasta)
+                self.assertEqual(arquivo.read_bytes(), b"video")
+                self.assertTrue(fonte.letra_no_video)
+                self.assertEqual(mensagens, [])
+
+    def test_troca_para_faixa_da_fila_sem_fazer_outro_download(self):
+        atual, proxima = ("Sol", "Cantora"), ("Lua", "Cantora")
+        fila = {"reproducao_id": 1, "uri": "spotify:track:lua", "musica": proxima,
+                "artistas": ("Cantora",), "album": "Noite", "dur": 200}
+        snap = {"musica": atual, "tocando": True, "reproducao_id": 1, "proximo_clipe": fila}
+        fonte = FonteClipe(lambda: dict(snap), lambda: True, lambda _: None, lambda _: None)
+        exibidos = []
+
+        def baixar(_snap, chave, pasta, *, ativo=None, status=None):
+            arquivo = pasta / "clipe.aaaaaaaaaaa.mp4"
+            arquivo.write_text(chave[0][0], encoding="utf-8")
+            return arquivo, False
+
+        def reproduzir(arquivo, chave, _ajuste, _audio, agendar):
+            exibidos.append(arquivo.read_text(encoding="utf-8"))
+            if chave[0] == atual:
+                agendar(dict(snap))
+                fonte._preparo.futuro.result(timeout=3)
+                snap.update(musica=proxima, album="Noite", dur=200, reproducao_id=2, proximo_clipe=None)
+            else:
+                fonte._parar.set()
+            return False
+
+        with (patch.object(fonte, "_selecionar_clipe", side_effect=baixar) as selecionar,
+              patch.object(fonte, "_reproduzir", side_effect=reproduzir)):
+            fonte._rodar()
+        self.assertEqual(exibidos, ["Sol", "Lua"])
+        self.assertEqual([c.args[1][0] for c in selecionar.call_args_list], [atual, proxima])
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
     def test_detecta_imagem_estatica_antes_de_usar_video_alternativo(self):

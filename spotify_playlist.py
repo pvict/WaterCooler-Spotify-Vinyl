@@ -1,4 +1,4 @@
-"""Obtém a capa da playlist atual pela Spotify Web API usando OAuth PKCE."""
+"""Obtém metadados de reprodução, playlist e fila pela Spotify Web API."""
 import base64
 import ctypes
 import hashlib
@@ -68,18 +68,20 @@ class SpotifyPlaylistWatcher:
     """Consulta reprodução, playlist e fila, reutilizando as capas baixadas."""
 
     def __init__(self, ao_atualizar, log, ler_estado=None, ao_proxima=None, ao_capa_album=None,
-                 ao_reproducao=None):
+                 ao_reproducao=None, ao_proximo_clipe=None):
         self.ao_atualizar = ao_atualizar
         self.log = log
         self.ler_estado = ler_estado
         self.ao_proxima = ao_proxima
         self.ao_capa_album = ao_capa_album
         self.ao_reproducao = ao_reproducao
+        self.ao_proximo_clipe = ao_proximo_clipe
         self._ler_dispositivo = ao_reproducao is not None
         self._album_confirmado_para = None
         self._cache_capas_album = {}
         self._ultimo_erro_album = None
         self._fila_consultada_para = None
+        self._fila_antecipada_para = None
         self._fila_validacao_log_id = None
         self._cache_capas_fila = {}
         self._autorizacao_ampliada_tentada = False
@@ -101,7 +103,10 @@ class SpotifyPlaylistWatcher:
             return
         self.thread = threading.Thread(target=self._executar, name="SpotifyPlaylist", daemon=True)
         if self.ao_proxima is not None:
-            self.log("Spotify a seguir: ativo; busca a fila perto dos últimos 32s da faixa.")
+            mensagem = "Spotify a seguir: prévia perto dos últimos 32s da faixa."
+            if self.ao_proximo_clipe is not None:
+                mensagem += " Consulta antecipada no modo Clipe."
+            self.log(mensagem)
         self.thread.start()
 
     def fechar(self):
@@ -274,8 +279,8 @@ class SpotifyPlaylistWatcher:
                 self._ultimo_erro_album = mensagem
 
     def _consultar_proxima(self, atual, token):
-        """Uma consulta por reprodução, perto do final; falhas não afetam a playlist."""
-        if self.ler_estado is None or self.ao_proxima is None:
+        """No modo Clipe, antecipa a fila e a confere novamente perto do fim."""
+        if self.ler_estado is None or (self.ao_proxima is None and self.ao_proximo_clipe is None):
             return
         snap = self.ler_estado()
         musica = snap.get("musica")
@@ -285,13 +290,16 @@ class SpotifyPlaylistWatcher:
         pos = snap.get("pos", 0.0) + max(0.0, time.monotonic() - snap.get("t_poll", 0.0))
         restante = dur - pos
         reproducao = snap.get("reproducao_id", 0)
-        if reproducao == self._fila_consultada_para:
-            return
-
         item = (atual or {}).get("item") or {}
         if item.get("duration_ms", 0) > 0 and (atual or {}).get("progress_ms") is not None:
             restante = (item["duration_ms"] - atual["progress_ms"]) / 1000.0
-        if not 15.0 < restante <= 32.0:
+        preparar_clipe = self.ao_proximo_clipe is not None and snap.get("modo_exibicao") == "clipe"
+        perto_do_fim = 15.0 < restante <= 32.0
+        if perto_do_fim:
+            if reproducao == self._fila_consultada_para:
+                return
+        elif (not preparar_clipe or restante <= 3.0 or reproducao == self._fila_antecipada_para
+              or reproducao == self._fila_consultada_para):
             return
         artistas = [a.get("name", "").casefold() for a in item.get("artists", [])]
         artista_local = (musica[1] or "").casefold()
@@ -305,9 +313,18 @@ class SpotifyPlaylistWatcher:
                 self._fila_validacao_log_id = reproducao
                 self.log("Spotify a seguir: aguardando a faixa da API coincidir com a mídia do Windows.")
             return
-        self._fila_consultada_para = reproducao
+        if perto_do_fim:
+            self._fila_consultada_para = reproducao
+        self._fila_antecipada_para = reproducao
+
+        def publicar_proximo_clipe(dados):
+            if (self.ao_proximo_clipe is not None and not self.parar.is_set()
+                    and self.ler_estado().get("reproducao_id") == reproducao):
+                self.ao_proximo_clipe(dict(dados, reproducao_id=reproducao))
+
         try:
             if (atual or {}).get("repeat_state") == "track":
+                publicar_proximo_clipe({})
                 self.log("Spotify a seguir: repetição da mesma faixa ativa; sem prévia de outra música.")
                 return
             self.log(f"Spotify a seguir: consultando fila ({musica[0]}; faltam {restante:.1f}s).")
@@ -315,14 +332,26 @@ class SpotifyPlaylistWatcher:
             tocando_fila = (fila or {}).get("currently_playing") or {}
             proximas = (fila or {}).get("queue") or []
             if tocando_fila.get("uri") != item.get("uri") or not proximas:
+                publicar_proximo_clipe({})
                 motivo = "faixa mudou durante a consulta" if proximas else "fila vazia"
                 self.log(f"Spotify a seguir: {motivo}; sem prévia nesta reprodução.")
                 return
             proxima = proximas[0]
             if proxima.get("type") != "track" or not proxima.get("name"):
+                publicar_proximo_clipe({})
                 self.log("Spotify a seguir: próximo item não é uma faixa com título.")
                 return
-            imagens = (proxima.get("album") or {}).get("images") or []
+            album = proxima.get("album") or {}
+            creditos = tuple(a["name"] for a in proxima.get("artists") or () if a.get("name"))
+            segundos = (proxima.get("duration_ms") or 0) / 1000.0
+            if creditos and proxima.get("uri") and segundos > 0:
+                publicar_proximo_clipe({"uri": proxima["uri"], "musica": (proxima["name"], ", ".join(creditos)),
+                                       "artistas": creditos, "album": album.get("name"), "dur": segundos})
+            else:
+                publicar_proximo_clipe({})
+            if not perto_do_fim or self.ao_proxima is None:
+                return
+            imagens = album.get("images") or []
             imagens = [img for img in imagens if img.get("url")]
             if not imagens:
                 self.log("Spotify a seguir: próxima faixa sem imagem de álbum.")

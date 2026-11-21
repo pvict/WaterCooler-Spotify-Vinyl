@@ -16,9 +16,10 @@ from letras_sincronizadas import FaixaLetra
 
 MODOS = ("dinamico", "spotify", "video", "clipe")
 LIMITE_SINCRONIA_CLIPE_MS = 3000
+LIMITE_SINCRONIA_LETRAS_MS = 3000
 PADRAO = {"modo": "dinamico", "brilho": None, "tela_ligada": True,
           "adiantar_clipe_ms": 0,
-          "letras_ativas": False,
+          "letras_ativas": False, "adiantar_letras_ms": 500,
           "video_ocioso": None, "video_ocioso_nome": "", "gaming": False,
           "lotus_ativo": False, "lotus_pasta": None,
           "lotus_modo": "musica", "lotus_cor": [255, 255, 255],
@@ -37,6 +38,9 @@ def validar(dados, anterior=None):
     adiantamento = dados.get("adiantar_clipe_ms")
     if type(adiantamento) is int and abs(adiantamento) <= LIMITE_SINCRONIA_CLIPE_MS:
         config["adiantar_clipe_ms"] = adiantamento
+    adiantamento = dados.get("adiantar_letras_ms")
+    if type(adiantamento) is int and abs(adiantamento) <= LIMITE_SINCRONIA_LETRAS_MS:
+        config["adiantar_letras_ms"] = adiantamento
     if "brilho" in dados:
         valor = dados["brilho"]
         if valor is None or (type(valor) is int and 1 <= valor <= 100):

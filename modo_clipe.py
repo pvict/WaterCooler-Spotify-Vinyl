@@ -1,6 +1,7 @@
 """Busca clipes públicos e fornece quadros RGB para o fluxo da tela USB."""
 
 import importlib.util
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 from pathlib import Path
 import queue
@@ -44,6 +45,7 @@ CONFIRMAR_DESVIO = 0.35
 INTERVALO_CORRECAO = 0.25
 DESVIO_PRIMEIRO_QUADRO = 0.20
 ESPERA_REPOSICIONAR = 1.8
+PRAZO_PREPARO_CLIPE = 45.0
 ID_VIDEO = re.compile(r"[A-Za-z0-9_-]{11}")
 AO_VIVO = ("ao vivo", "live", "en vivo", "in concert", "em concerto", "en concert")
 ACUSTICO = ("acustico", "acustica", "acoustic", "unplugged")
@@ -399,6 +401,20 @@ def identidade_audio(snap):
     return musica, album.get("album") if album.get("musica") == musica else None
 
 
+def corresponde_ao_preparo(snap, previsto):
+    musica, album = identidade_audio(snap)
+    album = album or snap.get("album")
+    duracao = snap.get("dur") or 0
+    if not musica or not all(musica) or not duracao:
+        return False
+    titulo, artista = previsto["musica"]
+    creditos = normalizar_artista(artista), normalizar_artista(previsto["artistas"][0])
+    return (normalizar(musica[0]) == normalizar(titulo)
+            and normalizar_artista(musica[1]) in creditos
+            and abs(duracao - previsto["dur"]) <= 5
+            and (not album or not previsto["album"] or normalizar(album) == normalizar(previsto["album"])))
+
+
 def video_tem_movimento(arquivo, limiar=4):
     lado = 48
     pixels = lado * lado
@@ -517,6 +533,12 @@ class QuadrosClipe:
             return self._atual[1]
 
 
+class PreparoClipe(NamedTuple):
+    previsto: dict
+    cancelar: threading.Event
+    futuro: Future
+
+
 class FonteClipe:
     """Busca e decodifica fora da thread que renderiza a tela."""
 
@@ -532,6 +554,8 @@ class FonteClipe:
         self._congelado_ate = 0.0
         self._status = ""
         self._busca = {}
+        self._lock_busca = threading.Lock()
+        self._preparo = None
         self.letra_no_video = False
 
     def iniciar(self):
@@ -602,6 +626,8 @@ class FonteClipe:
             self.publicar(texto)
 
     def _youtube(self, args, chave, timeout=16, ativo=None):
+        if (chave is not None and self._chave() != chave) or (ativo is not None and not ativo()):
+            return
         limite = time.monotonic() + timeout
         with subprocess.Popen(comando_youtube() + args, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -622,12 +648,15 @@ class FonteClipe:
                     proc.kill()
                     proc.communicate()
 
-    def _buscar_clipes(self, snap, chave, *, lyric_video=False):
+    def _buscar_clipes(self, snap, chave, *, lyric_video=False, ativo=None):
         musica = chave[0]
         duracao = snap.get("dur") or 0
         _, album = identidade_audio(snap)
+        album = album or snap.get("album")
         chave_busca = musica, album, round(duracao), lyric_video
-        if chave_busca not in self._busca:
+        with self._lock_busca:
+            cache = self._busca.get(chave_busca)
+        if cache is None:
             titulo, artista = musica
             faixa = titulo_base(titulo)
             subtitulo = normalizar(titulo.removeprefix(faixa))
@@ -643,10 +672,12 @@ class FonteClipe:
             entradas = {}
             candidatos = []
             falha = None
+            chave_atual = chave if ativo is None else None
+            opcoes = {} if ativo is None else {"ativo": ativo}
             for indice, texto in enumerate(dict.fromkeys(consultas)):
                 try:
                     saida = self._youtube(["--flat-playlist", "--dump-single-json", "--",
-                                           f"ytsearch20:{texto}"], chave)
+                                           f"ytsearch20:{texto}"], chave_atual, **opcoes)
                 except RuntimeError as exc:
                     falha = exc
                     continue
@@ -661,21 +692,23 @@ class FonteClipe:
                 if not lyric_video and candidatos and (not projeto or indice > 0 or candidatos[0].mesmo_projeto):
                     break
             if not candidatos or not candidatos[0].oficial:
-                confirmada = self._confirmar_canal(entradas.values(), candidatos, musica, duracao, chave, album,
-                                                   lyric_video=lyric_video)
+                confirmada = self._confirmar_canal(entradas.values(), candidatos, musica, duracao, chave_atual,
+                                                   album, lyric_video=lyric_video, **opcoes)
                 if confirmada:
                     entradas[confirmada["id"]].update(confirmada)
                     candidatos = classificar_clipes(entradas.values(), musica, duracao, album, lyric_video=lyric_video)
             if falha is not None and not entradas:
                 raise falha
             if candidatos:
-                if len(self._busca) >= 64:
-                    self._busca.pop(next(iter(self._busca)))
-                self._busca[chave_busca] = candidatos
+                with self._lock_busca:
+                    if len(self._busca) >= 64:
+                        self._busca.pop(next(iter(self._busca)))
+                    self._busca[chave_busca] = candidatos
             return candidatos
-        return self._busca[chave_busca]
+        return cache
 
-    def _confirmar_canal(self, entradas, candidatos, musica, duracao, chave, album=None, *, lyric_video=False):
+    def _confirmar_canal(self, entradas, candidatos, musica, duracao, chave, album=None, *,
+                        lyric_video=False, ativo=None):
         resultados = [e for e in entradas if isinstance(e, dict)]
         conhecidos = {c.id for c in candidatos}
         conhecidos.update(e.get("id") for e in resultados if e.get("channel_is_verified") is True)
@@ -689,7 +722,7 @@ class FonteClipe:
             args = ["--no-playlist", "--skip-download", "--dump-single-json", "--",
                     f"https://www.youtube.com/watch?v={candidato.id}"]
             try:
-                saida = self._youtube(args, chave, timeout=5)
+                saida = self._youtube(args, chave, timeout=5, ativo=ativo)
             except RuntimeError:
                 continue
             if saida is None:
@@ -699,12 +732,12 @@ class FonteClipe:
                     [entrada], musica, duracao, album, lyric_video=lyric_video):
                 return entrada
 
-    def _baixar_video(self, video, pasta, chave, timeout):
+    def _baixar_video(self, video, pasta, chave, timeout, *, ativo=None):
         saida = self._youtube(["--no-playlist", "--no-part", "--max-filesize", "45M",
                                "--match-filters", "description !^=? 'Provided to YouTube by'",
                                "-f", "b[height<=480][protocol=https]/bv[height<=480][protocol=https]",
                                "-o", str(pasta / f"clipe.{video}.%(ext)s"), "--",
-                               f"https://www.youtube.com/watch?v={video}"], chave, timeout=timeout)
+                               f"https://www.youtube.com/watch?v={video}"], chave, timeout=timeout, ativo=ativo)
         if saida is not None:
             return next(pasta.glob(f"clipe.{video}.*"), None)
 
@@ -756,45 +789,120 @@ class FonteClipe:
 
     def _carregar_clipe(self, snap, chave, pasta):
         self.letra_no_video = False
+        resultado = self._selecionar_clipe(snap, chave, pasta, status=self._mensagem)
+        if resultado:
+            arquivo, self.letra_no_video = resultado
+            return arquivo
+
+    def _selecionar_clipe(self, snap, chave, pasta, *, ativo=None, status=None):
         ultima_falha = None
+        pedido_ativo = ativo if ativo is not None else lambda: self._chave() == chave
+        opcoes = {} if ativo is None else {"ativo": ativo}
         for lyric_video in (False, True):
-            if self._chave() != chave:
+            if not pedido_ativo():
                 return
-            if lyric_video:
-                self._mensagem("Buscando lyric video no YouTube…")
+            if lyric_video and status is not None:
+                status("Buscando lyric video no YouTube…")
             try:
-                candidatos = self._buscar_clipes(snap, chave, lyric_video=lyric_video)
+                candidatos = self._buscar_clipes(snap, chave, lyric_video=lyric_video, **opcoes)
                 if not candidatos:
                     continue
-                self._mensagem("Carregando lyric video…" if lyric_video else "Carregando clipe…")
-                arquivo = self._tentar_videos(candidatos, chave, pasta, lyric_video)
+                if status is not None:
+                    status("Carregando lyric video…" if lyric_video else "Carregando clipe…")
+                arquivo = self._tentar_videos(candidatos, chave, pasta, lyric_video, **opcoes)
             except RuntimeError as exc:
                 ultima_falha = exc
                 continue
             if arquivo:
-                self.letra_no_video = lyric_video
-                return arquivo
-        if ultima_falha is not None and self._chave() == chave:
+                return arquivo, lyric_video
+        if ultima_falha is not None and pedido_ativo():
             raise ultima_falha
 
-    def _tentar_videos(self, candidatos, chave, pasta, lyric_video):
+    def _tentar_videos(self, candidatos, chave, pasta, lyric_video, *, ativo=None):
         limite = time.monotonic() + 48
         ultima_falha = None
+        pedido_ativo = ativo if ativo is not None else lambda: self._chave() == chave
+        chave_atual = chave if ativo is None else None
+        opcoes = {} if ativo is None else {"ativo": ativo}
         for candidato in candidatos[:5]:
             restante = limite - time.monotonic()
-            if self._chave() != chave or restante <= 0:
+            if not pedido_ativo() or restante <= 0:
                 break
             try:
-                arquivo = self._baixar_video(candidato.id, pasta, chave, timeout=min(40, restante))
-                if arquivo and (not lyric_video and candidato.oficial and not candidato.exigir_movimento
-                                or video_tem_movimento(arquivo, limiar=1 if lyric_video else 4)):
+                arquivo = self._baixar_video(candidato.id, pasta, chave_atual,
+                                            timeout=min(40, restante), **opcoes)
+                if arquivo and pedido_ativo() and (
+                        not lyric_video and candidato.oficial and not candidato.exigir_movimento
+                        or video_tem_movimento(arquivo, limiar=1 if lyric_video else 4)):
                     return arquivo
             except RuntimeError as exc:
                 ultima_falha = exc
             for parcial in pasta.glob("clipe.*"):
                 parcial.unlink(missing_ok=True)
-        if ultima_falha is not None and self._chave() == chave:
+        if ultima_falha is not None and pedido_ativo():
             raise ultima_falha
+
+    def _agendar_preparo(self, snap, pasta, executor):
+        previsto = snap.get("proximo_clipe")
+        if (not previsto or snap.get("reproducao_id") != previsto["reproducao_id"]
+                or self._chave(snap) is None or corresponde_ao_preparo(snap, previsto)):
+            return
+        anterior = self._preparo
+        if anterior is not None:
+            if anterior.previsto == previsto and not anterior.cancelar.is_set():
+                return
+            anterior.cancelar.set()
+            if not anterior.futuro.done():
+                return
+        for arquivo in pasta.glob("clipe.*"):
+            arquivo.unlink(missing_ok=True)
+        cancelar = threading.Event()
+        futuro = executor.submit(self._preparar, previsto, pasta, cancelar)
+        self._preparo = PreparoClipe(previsto, cancelar, futuro)
+
+    def _preparar(self, previsto, pasta, cancelar):
+        inicio = time.monotonic()
+
+        def ativo():
+            if (cancelar.is_set() or self._parar.is_set() or not self.ativo()
+                    or time.monotonic() - inicio >= PRAZO_PREPARO_CLIPE):
+                return False
+            snap = self.ler_estado()
+            if snap.get("reproducao_id") == previsto["reproducao_id"]:
+                return snap.get("proximo_clipe") == previsto
+            return corresponde_ao_preparo(snap, previsto)
+
+        try:
+            resultado = self._selecionar_clipe(previsto, (previsto["musica"], None), pasta,
+                                              ativo=ativo, status=None)
+            if resultado and ativo():
+                self.log(f"clipe: próxima faixa preparada em {time.monotonic() - inicio:.1f}s")
+                return resultado
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.log(f"clipe: preparo da fila indisponível ({type(exc).__name__})")
+
+    def _usar_preparo(self, snap, chave, pasta):
+        preparo = self._preparo
+        if (preparo is None or preparo.cancelar.is_set()
+                or snap.get("reproducao_id") == preparo.previsto["reproducao_id"]
+                or not corresponde_ao_preparo(snap, preparo.previsto)):
+            return
+        while self._chave() == chave and corresponde_ao_preparo(self.ler_estado(), preparo.previsto):
+            if preparo.futuro.done():
+                resultado = preparo.futuro.result()
+                self._preparo = None
+                if resultado:
+                    arquivo, lyric_video = resultado
+                    try:
+                        destino = arquivo.replace(pasta / arquivo.name)
+                    except OSError as exc:
+                        self.log(f"clipe: arquivo preparado indisponível ({type(exc).__name__})")
+                        return
+                    self.letra_no_video = lyric_video
+                    self.log("clipe: exibindo arquivo preparado pela fila do Spotify")
+                    return destino
+                return
+            self._parar.wait(INTERVALO)
 
     def _ler_quadros(self, proc, inicio, quadros, cancelar):
         indice = 0
@@ -819,7 +927,7 @@ class FonteClipe:
     def posicao_letra(self, snap, agora):
         return self._posicao_tela(snap, agora)
 
-    def _reproduzir(self, arquivo, chave, ajuste_audio, audio):
+    def _reproduzir(self, arquivo, chave, ajuste_audio, audio, agendar_preparo):
         """Retorna True quando o fluxo deve ser reaberto em outra posição."""
         snap = self.ler_estado()
         anterior = amostra_posicao(snap)
@@ -885,6 +993,7 @@ class FonteClipe:
                             self.log("clipe: quadros prontos para a tela USB")
                             self._mensagem("")
                         prazo_quadro = agora + 8
+                        agendar_preparo(snap)
                     if (quadros.esgotado.is_set() or agora >= prazo_quadro) and not ajuste_audio.preparando:
                         break
                     quadros.reposicionar.wait(INTERVALO)
@@ -903,8 +1012,15 @@ class FonteClipe:
         retentar_em = None
         tentativas = 0
         musica_salva = arquivo = ajuste_audio = None
-        with TemporaryDirectory(prefix="turing-vinyl-clipe-") as diretorio:
+        with (TemporaryDirectory(prefix="turing-vinyl-clipe-") as diretorio,
+              ThreadPoolExecutor(max_workers=1, thread_name_prefix="PreparoClipe") as executor):
             pasta = Path(diretorio)
+            pasta_preparo = pasta / "proximo"
+            pasta_preparo.mkdir()
+
+            def agendar_preparo(snap):
+                self._agendar_preparo(snap, pasta_preparo, executor)
+
             while not self._parar.is_set():
                 snap = self.ler_estado()
                 chave = self._chave(snap)
@@ -925,7 +1041,7 @@ class FonteClipe:
                                            or posicao_atual(snap, agora) < fim - TOLERANCIA)):
                     tentativas = 1 if nova_reproducao else tentativas + 1
                     tentado, fim, retentar_em = (chave, audio), None, None
-                    self._mensagem("Buscando clipe no YouTube…")
+                    self._mensagem("Preparando exibição do clipe…")
                     try:
                         if musica_salva != audio:
                             if ajuste_audio is not None:
@@ -933,7 +1049,15 @@ class FonteClipe:
                             for anterior in pasta.glob("clipe.*"):
                                 anterior.unlink()
                             musica_salva = arquivo = ajuste_audio = None
-                            arquivo = self._carregar_clipe(snap, chave, pasta)
+                            arquivo = self._usar_preparo(snap, chave, pasta)
+                            if arquivo is None and self._chave() == chave:
+                                if self._preparo is not None:
+                                    self._preparo.cancelar.set()
+                                self._mensagem("Buscando clipe no YouTube…")
+                                inicio_carga = time.monotonic()
+                                arquivo = self._carregar_clipe(snap, chave, pasta)
+                                if arquivo:
+                                    self.log(f"clipe: busca e download em {time.monotonic() - inicio_carga:.1f}s")
                             if arquivo:
                                 musica_salva = audio
                                 ajuste_audio = AjustePorAudio(
@@ -946,7 +1070,7 @@ class FonteClipe:
                                     and identidade_audio(self.ler_estado()) == audio)
                         if arquivo:
                             while (self._chave() == chave and identidade_audio(self.ler_estado()) == audio
-                                   and self._reproduzir(arquivo, chave, ajuste_audio, audio)):
+                                   and self._reproduzir(arquivo, chave, ajuste_audio, audio, agendar_preparo)):
                                 pass
                             fim = posicao_atual(self.ler_estado(), time.monotonic())
                             ultimo_adiantamento = self.ler_adiantamento_ms()
@@ -961,6 +1085,8 @@ class FonteClipe:
                             else:
                                 self._mensagem(str(exc) if isinstance(exc, RuntimeError)
                                                else "Falha ao carregar o clipe.")
+                else:
+                    agendar_preparo(snap)
                 self._parar.wait(INTERVALO)
             if ajuste_audio is not None:
                 ajuste_audio.aguardar()
