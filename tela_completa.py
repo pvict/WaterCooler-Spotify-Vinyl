@@ -1371,8 +1371,6 @@ class Painel:
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
         if letra is not None:
             posicao = posicao_atual(snap, time.monotonic()) + config["adiantar_letras_ms"] / 1000
-        if letra is not None and not ocioso_longo:
-            posicao = posicao_atual(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
             # A capa confirmada é da faixa atual. O painel pode ainda mostrar a anterior.
             quadro = self.visual_letras.spotify(snap.get("capa_letras"), letra, posicao)
             estado["status_letras"] = (faixa, modo, "exibindo")
