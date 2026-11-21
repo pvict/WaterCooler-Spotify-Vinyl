@@ -75,7 +75,16 @@ The interface labels are currently in Portuguese.
 | **Dinâmico** | Vinyl while music plays; background video when paused or idle. |
 | **Spotify** | Vinyl stays visible; it gently stops and the artwork shrinks on pause. |
 | **Vídeo** | Background video only. |
+| **Clipe** | Finds the track on YouTube and shows the music video on the USB display. Audio stays on Spotify. |
 | **Gaming** | Loops a prepared background at 30 FPS with reduced processing and no music overlays. Switch it off to restore your selected mode. |
+
+To enable **Clipe**, install [Node.js LTS](https://nodejs.org/) and run `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` from the project folder. Reopen the app. This mode uses an unofficial YouTube integration. The display shows vinyl while searching, when paused, or if the video is unavailable. With Windows process loopback and an FFmpeg build that includes Chromaprint, the app compares Spotify audio with the clip. When a catalog recording also matches Spotify, the app uses it to map cuts and speed changes throughout the track. Spotify samples are processed locally in memory. Some edits may still have sections without a reliable match.
+
+In **Clipe** mode, use **Sincronia** to compensate for a consistent delay between sound and the USB display. Positive values advance the video. The setting is saved across tracks.
+
+The app searches YouTube by artist and track title. For live and acoustic tracks, it uses the Spotify album to identify the matching performance when possible. It tries videos within the compatible group in order of view count and skips audio-only uploads. When a music video is unavailable, it tries compatible lyric videos in order of view count.
+
+Enable **Letras** to show synchronized lyrics on the USB display. The full-screen view uses blurred album artwork, animated verse changes, and smaller text for surrounding verses. In **Clipe**, lyrics appear as subtitles when video is available and use the full-screen view while it loads or is unavailable. The status beside **Letras** shows the state of the lookup and display. The app looks for timed lyrics in [LRCLIB](https://lrclib.net/) and [LRCMux](https://lrcmux.dev/).
 
 | Control | What it does |
 | --- | --- |

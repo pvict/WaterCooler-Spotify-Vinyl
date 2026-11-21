@@ -73,7 +73,16 @@ Dê dois cliques em **Turing Vinyl.lnk**, na pasta do projeto. Use esse atalho n
 | **Dinâmico** | Vinil enquanto a música toca; vídeo de fundo durante a pausa ou ociosidade. |
 | **Spotify** | O vinil permanece visível; para suavemente e a capa encolhe ao pausar. |
 | **Vídeo** | Apenas o vídeo de fundo. |
+| **Clipe** | Procura a faixa no YouTube e mostra o clipe só na tela USB. O áudio continua no Spotify. |
 | **Gaming** | Repete um fundo preparado a 30 FPS, com menos processamento e sem informações da música. Desative para voltar ao modo escolhido. |
+
+Para habilitar **Clipe**, instale o [Node.js LTS](https://nodejs.org/) e execute `.\.venv\Scripts\python.exe -m pip install -U "yt-dlp[default]"` na pasta do projeto. Reabra o app. O modo usa uma integração não oficial com o YouTube. Durante a busca, em pausa ou se o clipe estiver indisponível, a tela mostra o vinil. Quando a captura por processo do Windows e o Chromaprint do FFmpeg estão disponíveis, o app compara o áudio do Spotify com o do clipe. Se uma gravação de catálogo também corresponder ao Spotify, o app usa essa gravação para mapear cortes e diferenças de velocidade ao longo da faixa. As amostras do Spotify são analisadas localmente, em memória. Algumas edições podem ter trechos sem correspondência confiável.
+
+No modo **Clipe**, use **Sincronia** para compensar um atraso constante entre o som e a tela USB. Valores positivos adiantam o vídeo. O ajuste fica salvo e vale para todas as faixas.
+
+O app busca pelo artista e pelo título da faixa no YouTube. Para faixas ao vivo e acústicas, usa o álbum do Spotify para identificar a gravação correspondente quando possível. Dentro do grupo compatível, tenta os vídeos em ordem de visualizações e descarta publicações só de áudio. Quando não há clipe disponível, tenta os lyric videos compatíveis em ordem de visualizações.
+
+Ative **Letras** para ver os versos sincronizados na tela USB. A visualização em tela cheia usa a capa desfocada, anima a troca de verso e mostra os versos vizinhos em tamanho menor. Em **Clipe**, a letra aparece sobre o vídeo e usa a tela cheia enquanto o vídeo carrega ou está indisponível. O status ao lado de **Letras** informa o andamento da busca e da exibição. O app busca letras cronometradas no [LRCLIB](https://lrclib.net/) e no [LRCMux](https://lrcmux.dev/).
 
 | Controle | Para que serve |
 | --- | --- |
