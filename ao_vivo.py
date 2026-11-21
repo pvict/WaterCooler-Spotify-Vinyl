@@ -203,6 +203,10 @@ class FundoDecoder:
     """Lê quadros de um vídeo em loop (ffmpeg), já em 480x480 RGB."""
 
     def __init__(self, caminho, fps=30, log=None, nome="fundo"):
+        self._args = (caminho, fps, log, nome)
+        self._falhas = 0
+        self._fechado = False
+        self._retentar_em = 0.0
         self.proc = subprocess.Popen(
             ["ffmpeg", "-nostdin", "-loglevel", "warning", "-stream_loop", "-1", "-i", caminho,
              "-vf", f"scale={LADO}:{LADO}", "-r", str(fps),
@@ -217,10 +221,36 @@ class FundoDecoder:
     def proximo(self):
         dados = self.proc.stdout.read(BYTES_QUADRO)
         if len(dados) < BYTES_QUADRO:
+            self._falhas += 1
+            if self._falhas >= 3 and not self._fechado and time.monotonic() >= self._retentar_em:
+                self._retentar_em = time.monotonic() + 5.0   # no máximo uma tentativa a cada 5 s
+                self._reiniciar()
             return None
+        self._falhas = 0
         return Image.frombytes("RGB", (LADO, LADO), dados)
 
+    def _reiniciar(self):
+        """O ffmpeg do fundo encerrou: abre outro em vez de ficar num quadro sólido."""
+        caminho, fps, log, nome = self._args
+        self._falhas = 0
+        if log:
+            log(f"ffmpeg {nome}: decoder encerrou; reiniciando")
+        try:
+            self.proc.kill()
+            self.proc.wait(timeout=2)
+        except Exception:
+            pass
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-nostdin", "-loglevel", "warning", "-stream_loop", "-1", "-i", caminho,
+             "-vf", f"scale={LADO}:{LADO}", "-r", str(fps),
+             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=SEM_JANELA,
+        )
+        _monitorar_stderr(self.proc, nome, log)
+
     def fechar(self):
+        self._fechado = True
         try:
             self.proc.kill()
             self.proc.wait(timeout=2)

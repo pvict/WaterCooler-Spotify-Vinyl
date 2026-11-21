@@ -690,6 +690,8 @@ def _cor_rgba(cor):
 
 
 # --- animações (ajuste à vontade) ---
+PAUSA_ESTATICA_MAX = 20   # s parado/sem música até o painel parado ceder ao vídeo em movimento
+TELA_APAGAR_APOS = 3600.0    # s sem música até apagar a tela de vez; 0 = nunca apaga
 ROTACAO_GRAUS_S = 40.0   # giro do disco enquanto toca (graus por segundo); 0 = capa parada
 TEMPO_ACELERAR = 1.0     # s para o disco chegar à velocidade ao tocar/retomar
 TEMPO_FREAR = 2.0        # s para o disco parar ao pausar (desacelera até zero)
@@ -789,6 +791,9 @@ class Painel:
         self._proxima_ja_mostrada = False
         self._proxima_ate = 0.0
         self._proxima_inicio = None
+        # Ociosidade longa: evita imagem estática prolongada no LCD.
+        self._t_parado = None
+        self._apagada_por_inatividade = False
         self._zerar()
 
     def _zerar(self):
@@ -827,7 +832,7 @@ class Painel:
             return
         self._revisao_brilho = controles.revisao
         self.t_brilho = agora
-        novo = brilho_tela_para(datetime.datetime.now())
+        novo = 0 if self._apagada_por_inatividade else brilho_tela_para(datetime.datetime.now())
         if novo != self.brilho:
             self.brilho = novo
             # só a thread do USB fala com a tela
@@ -1201,6 +1206,22 @@ class Painel:
             })
             snap["tocando"] = False
         tocando = snap.get("musica") is not None and snap.get("tocando", False)
+        if tocando or modo == "video":
+            self._t_parado = None
+        elif self._t_parado is None:
+            self._t_parado = agora
+        parado_por = 0.0 if self._t_parado is None else agora - self._t_parado
+        ocioso_longo = parado_por > PAUSA_ESTATICA_MAX
+        if TELA_APAGAR_APOS and parado_por > TELA_APAGAR_APOS:
+            # Muito tempo sem música: apaga a tela e zera o brilho.
+            if self.letras is not None:
+                self.letras.consultar(None)
+            estado["status_letras"] = None
+            self._apagada_por_inatividade = True
+            self.estava_tocando = tocando
+            self._publicar_visual(False)
+            return self._quadro_apagado
+        self._apagada_por_inatividade = False
         self._girar_fundo(agora, dt, tocando)
         reservar_final = self._aviso_proxima(snap, agora, tocando)
         uri_playlist = snap.get("playlist_uri") if tocando and snap.get("capa_playlist") is not None else None
@@ -1245,8 +1266,9 @@ class Painel:
                 self._retomar_giro_dinamico = True
                 self._capa_retomada_dinamica = self._capa_girada()
                 self._cor_retomada_dinamica = self.cor
-        mostrar = (modo in ("spotify", "clipe") or tocando
-                   or (modo != "video" and self.t_pausa is not None and agora - self.t_pausa < ATRASO_OCIOSO))
+        mostrar = (not ocioso_longo) and (
+            modo in ("spotify", "clipe") or tocando
+            or (modo != "video" and self.t_pausa is not None and agora - self.t_pausa < ATRASO_OCIOSO))
         alvo = 1.0 if mostrar else 0.0
         if self.p < alvo:
             self.p = min(alvo, self.p + dt / FADE_ENTRA)
@@ -1276,7 +1298,7 @@ class Painel:
             return bg
         self.estava_tocando = tocando
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
-        if letra is not None:
+        if letra is not None and not ocioso_longo:
             posicao = posicao_atual(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
             # A capa confirmada é da faixa atual. O painel pode ainda mostrar a anterior.
             quadro = self.visual_letras.spotify(snap.get("capa_letras"), letra, posicao)
@@ -1370,6 +1392,7 @@ def sessao_usb(gaming, clipe, letras):
 
                 def ponte():
                     ultimo_brilho = brilho
+                    ultimo_q, t_q = -1, time.monotonic()
                     while not parar_sessao.is_set():
                         perfil_clipe = not economico and controles.config["modo"] == "clipe"
                         if parar.is_set() or gaming.destino() != arquivo_gaming or perfil_clipe != modo_clipe:
@@ -1382,6 +1405,14 @@ def sessao_usb(gaming, clipe, letras):
                                     lambda tela, b=novo: operations.send_brightness_command(tela, b))
                                 ultimo_brilho = novo
                                 log(f"Brilho alterado para: {novo}%")
+                        if not economico:
+                            q = pipe.quadros
+                            if q != ultimo_q:
+                                ultimo_q, t_q = q, time.monotonic()
+                            elif time.monotonic() - t_q > 8.0:
+                                log("watchdog: nenhum quadro gerado em 8s; reiniciando o fluxo")
+                                parar_sessao.set()
+                                return
                         parar_sessao.wait(0.1)
 
                 ponte_thread = threading.Thread(target=ponte, name="PerfilTela", daemon=True)
