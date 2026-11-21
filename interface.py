@@ -4,6 +4,7 @@ Tkinter + Pillow, sem navegador embutido. Prévia pequena com alvo de 60 FPS.
 O script original roda em um processo separado, com comandos em pipes locais.
 """
 import base64
+import ctypes
 import io
 import json
 import math
@@ -15,8 +16,9 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
+from ctypes import wintypes
 from pathlib import Path
-from tkinter import filedialog, simpledialog
+from tkinter import filedialog
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
@@ -25,8 +27,8 @@ from controles_spotify import ControlesSpotify
 from fundo_usuario import ConversorFundo
 from leds_lotus import pasta_valida
 from painel_lotus import PainelLotus
-from controle_interface import (LIMITE_SINCRONIA_CLIPE_MS, PREFIXO, brilho_horario, carregar, salvar,
-                                reservar_execucao, liberar_execucao)
+from controle_interface import (LIMITE_SINCRONIA_CLIPE_MS, LIMITE_SINCRONIA_LETRAS_MS, PREFIXO,
+                                brilho_horario, carregar, salvar, reservar_execucao, liberar_execucao)
 from estilo_interface import (CanvasSuave, FonteInterface, Dica, configurar_dpi,
                                superficie, icone, limitar_linhas, texto_suave,
                                RotacaoPreview, RelogioAnimacaoWindows)
@@ -45,6 +47,33 @@ MODOS = [
 ]
 SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 UI_FPS = 60
+TOPO_TRANSPORTE = 310
+TOPO_TITULO = 177
+SINCRONIAS = {
+    "letras": ("Sincronia das letras", "adiantar_letras_ms", LIMITE_SINCRONIA_LETRAS_MS),
+    "video": ("Sincronia do vídeo", "adiantar_clipe_ms", LIMITE_SINCRONIA_CLIPE_MS),
+}
+
+
+def centralizar_janela(janela, largura, altura):
+    esquerda = topo = 0
+    direita, base = janela.winfo_screenwidth(), janela.winfo_screenheight()
+    largura_externa, altura_externa = largura, altura
+    if os.name == "nt":
+        try:
+            user = ctypes.WinDLL("user32", use_last_error=True)
+            area = wintypes.RECT()
+            if user.SystemParametersInfoW(0x0030, 0, ctypes.byref(area), 0):  # SPI_GETWORKAREA
+                esquerda, topo, direita, base = area.left, area.top, area.right, area.bottom
+            moldura = wintypes.RECT(0, 0, largura, altura)
+            if user.AdjustWindowRectEx(ctypes.byref(moldura), 0x00CF0000, False, 0):  # WS_OVERLAPPEDWINDOW
+                largura_externa = moldura.right - moldura.left
+                altura_externa = moldura.bottom - moldura.top
+        except (OSError, AttributeError):
+            pass
+    x = max(esquerda, esquerda + (direita - esquerda - largura_externa) // 2)
+    y = max(topo, topo + (base - topo - altura_externa) // 2)
+    janela.geometry(f"{largura}x{altura}+{x}+{y}")
 
 
 def proximo_quadro(widget, inicio, callback):
@@ -156,11 +185,12 @@ def disco_base():
 class Botao(CanvasSuave):
     def __init__(self, master, texto, comando, largura=150, altura=40,
                  primario=False, fundo=FUNDO, simbolo=None, dica="", midia=False,
-                 mostrar_ponto=True, mostrar_foco=True):
+                 mostrar_ponto=True, mostrar_foco=True, foco_na_face=False):
         super().__init__(master, width=largura, height=altura, bg=fundo,
                          highlightthickness=0, bd=0, takefocus=True, cursor="hand2")
         self.texto, self.comando, self.primario = texto, comando, primario
         self.midia = midia
+        self.foco_na_face = foco_na_face
         self.mostrar_ponto, self.mostrar_foco = mostrar_ponto, mostrar_foco
         self.cor = PRATA
         self.simbolo, self.selecionado = simbolo, False
@@ -226,8 +256,11 @@ class Botao(CanvasSuave):
                                                outline="", state="hidden")
             self.foco_item = self.create_line(w / 2 - 7, h - 12, w / 2 + 7, h - 12,
                                                width=2, capstyle=tk.ROUND, state="hidden")
+        com_foco = self.mostrar_foco and self.focus_get() is self
         if self.ativo:
             preenchimento = misturar(preenchimento, "#ffffff", round(self.hover_t * 12) / 12 * 0.12)
+            if com_foco and self.foco_na_face:
+                preenchimento = misturar(preenchimento, self.cor, 0.14)
         self.alterar_imagem(self.face_item, superficie((w, h), preenchimento,
                                 raio=(w / 2 if not self.texto else 16), pressionado=self.selecionado))
         tinta = ("#ffffff" if self.primario else TEXTO) if self.ativo else SECUNDARIO
@@ -250,8 +283,8 @@ class Botao(CanvasSuave):
         if self.midia:
             self.coords(self.ponto_item, w / 2 - 2, h - 11, w / 2 + 2, h - 7)
         self.itemconfigure(self.foco_item, fill=self.cor,
-                            state="normal" if self.mostrar_foco and not self.selecionado
-                            and self.focus_get() is self else "hidden")
+                            state="normal" if com_foco and not self.foco_na_face
+                            and not self.selecionado else "hidden")
         self._ultima_pintura = (self.texto, self.ativo, self.cor, self.selecionado, self.simbolo,
                                self.primario, self.mostrar_ponto)
 
@@ -373,12 +406,16 @@ class Seletor(CanvasSuave):
 
 
 class Slider(CanvasSuave):
-    def __init__(self, master, valor, comando, largura=620, fundo=CARTAO):
-        super().__init__(master, width=largura, height=46, bg=fundo,
+    def __init__(self, master, valor, comando, largura=620, fundo=CARTAO,
+                 minimo=0, maximo=100, passo=1, altura=46, compacto=False):
+        super().__init__(master, width=largura, height=altura, bg=fundo,
                          highlightthickness=0, takefocus=True, cursor="hand2")
-        # Reserva o raio máximo do halo (19 px), com folga nas duas pontas.
-        self.margem = 24
+        self.altura = altura
+        self.compacto = compacto
+        self.margem = 9 if compacto else altura // 2 + 1
         self.percurso = largura - 2 * self.margem
+        self.minimo, self.maximo = minimo, maximo
+        self.passo = passo
         self.valor, self.comando = valor, comando
         self.cor, self.job = PRATA, None
         self.hover_t, self.hover_job = 0.0, None
@@ -391,8 +428,8 @@ class Slider(CanvasSuave):
         self.bind("<Right>", lambda e: self.tecla(1))
         self.bind("<Prior>", lambda e: self.tecla(10))
         self.bind("<Next>", lambda e: self.tecla(-10))
-        self.bind("<Home>", lambda e: self.tecla(-100))
-        self.bind("<End>", lambda e: self.tecla(100))
+        self.bind("<Home>", lambda e: self.tecla(self.minimo - self.maximo))
+        self.bind("<End>", lambda e: self.tecla(self.maximo - self.minimo))
         self.bind("<FocusIn>", lambda e: self.desenhar())
         self.bind("<FocusOut>", lambda e: self.desenhar())
         self.desenhar()
@@ -401,66 +438,95 @@ class Slider(CanvasSuave):
         if self["state"] == "disabled":
             return "break"
         self.focus_set()
-        self.valor = round(max(0, min(100, (e.x - self.margem) / self.percurso * 100)))
+        t = max(0, min(1, (e.x - self.margem) / self.percurso))
+        unidades = round(t * (self.maximo - self.minimo) / self.passo)
+        self.valor = min(self.maximo, self.minimo + unidades * self.passo)
         self.desenhar()
         self.comando(self.valor, False)
 
     def soltar(self, e):
         if self["state"] != "disabled":
+            if self.job is not None:
+                self.after_cancel(self.job)
+                self.job = None
             self.comando(self.valor, True)
 
     def tecla(self, incremento):
         if self["state"] == "disabled":
             return "break"
-        self.valor = max(0, min(100, self.valor + incremento))
+        self.valor = max(self.minimo, min(self.maximo, self.valor + incremento * self.passo))
         self.desenhar()
         self.comando(self.valor, False)
         if self.job:
             self.after_cancel(self.job)
-        self.job = self.after(250, lambda: self.comando(self.valor, True))
+        self.job = self.after(250, lambda: self.soltar(None))
         return "break"
 
-    def atualizar(self, valor=None, cor=None):
-        anterior = (self.valor, self.cor)
+    def atualizar(self, valor=None, cor=None, limites=None):
+        anterior = (self.valor, self.cor, self.minimo, self.maximo)
         if valor is not None:
             self.valor = valor
         if cor:
             self.cor = cor
-        if (self.valor, self.cor) != anterior:
+        if limites is not None:
+            self.minimo, self.maximo = limites
+        if (self.valor, self.cor, self.minimo, self.maximo) != anterior:
+            self._trilho_chave = None
             self.desenhar()
 
     def desenhar(self):
-        x = self.margem + self.valor / 100 * self.percurso
+        x = self.margem + (self.valor - self.minimo) / (self.maximo - self.minimo) * self.percurso
         w = int(self["width"])
+        centro = self.altura // 2
+        raio_botao = 7 if self.compacto else centro - 1
+        y_botao = centro - raio_botao
         if not hasattr(self, "trilho_item"):
             vazio = Image.new("RGBA", (1, 1))
             self.trilho_item = self.imagem(0, 0, vazio, anchor="nw")
-            self.botao_item = self.imagem(x - 22, 1, superficie((44, 44), "#fbfbf8", raio=22), anchor="nw")
+            lado = 2 * raio_botao
+            if self.compacto:
+                botao = Image.new("RGBA", (lado * 3, lado * 3))
+                ImageDraw.Draw(botao).ellipse((1, 1, lado * 3 - 2, lado * 3 - 2), fill="#fbfbf8")
+                botao = botao.resize((lado, lado), Image.Resampling.LANCZOS)
+            else:
+                botao = superficie((lado, lado), "#fbfbf8", raio=raio_botao)
+            self.botao_item = self.imagem(x - raio_botao, y_botao, botao, anchor="nw")
+            self.foco_item = self.create_oval(0, 0, 1, 1, outline=SECUNDARIO, state="hidden")
             self.ponto_item = self.create_oval(0, 0, 1, 1, outline="")
             self._trilho_chave = None
+        raio = 3 + self.hover_t
+        self.coords(self.ponto_item, x - raio, centro - raio, x + raio, centro + raio)
+        raio_foco = raio_botao - 3
+        self.coords(self.foco_item, x - raio_foco, centro - raio_foco, x + raio_foco, centro + raio_foco)
+        self.itemconfigure(self.foco_item, state="normal" if self.focus_get() is self else "hidden")
         chave = (self.valor, self.cor)
         if chave == self._trilho_chave:
-            raio = 3 + self.hover_t
-            self.coords(self.ponto_item, x - raio, 23 - raio, x + raio, 23 + raio)
             return
         # O trilho e o botão usam a mesma escala de suavização dos ícones.
         escala = 3
-        img = Image.new("RGBA", (w * escala, 46 * escala))
+        img = Image.new("RGBA", (w * escala, self.altura * escala))
         d = ImageDraw.Draw(img)
-        a, b, y = self.margem * escala, (self.margem + self.percurso) * escala, 23 * escala
-        d.rounded_rectangle((a, y - 4 * escala, b, y + 4 * escala), radius=4 * escala,
+        a, b, y = self.margem * escala, (self.margem + self.percurso) * escala, centro * escala
+        meio_trilho = (2 if self.compacto else 4) * escala
+        d.rounded_rectangle((a, y - meio_trilho, b, y + meio_trilho), radius=meio_trilho,
                             fill="#d0d2d0")
-        d.line((a + 3 * escala, y - 3 * escala, b - 3 * escala, y - 3 * escala),
-                fill="#bdc1c1", width=escala)
-        d.line((a + 3 * escala, y + 4 * escala, b - 3 * escala, y + 4 * escala),
-                fill="#fafaf7", width=escala)
-        if self.valor:
-            d.rounded_rectangle((a, y - 3 * escala, max(a + 1, x * escala), y + 3 * escala),
-                                radius=3 * escala, fill=misturar("#828995", self.cor, 0.65))
-        self.alterar_imagem(self.trilho_item, img.resize((w, 46), Image.Resampling.LANCZOS))
-        self.coords(self.botao_item, x - 22, 1)
-        raio = 3 + self.hover_t
-        self.coords(self.ponto_item, x - raio, 23 - raio, x + raio, 23 + raio)
+        if not self.compacto:
+            d.line((a + 3 * escala, y - 3 * escala, b - 3 * escala, y - 3 * escala),
+                   fill="#bdc1c1", width=escala)
+            d.line((a + 3 * escala, y + 4 * escala, b - 3 * escala, y + 4 * escala),
+                   fill="#fafaf7", width=escala)
+        origem = a
+        if self.minimo < 0 < self.maximo:
+            origem += -self.minimo / (self.maximo - self.minimo) * self.percurso * escala
+        if x * escala != origem:
+            inicio, fim = sorted((origem, x * escala))
+            meio_ativo = min(meio_trilho, 3 * escala)
+            d.rounded_rectangle((inicio, y - meio_ativo, fim, y + meio_ativo),
+                                radius=meio_ativo, fill=misturar("#828995", self.cor, 0.65))
+        if origem != a and not self.compacto:
+            d.line((origem, y - 6 * escala, origem, y + 6 * escala), fill="#959ba1", width=escala)
+        self.alterar_imagem(self.trilho_item, img.resize((w, self.altura), Image.Resampling.LANCZOS))
+        self.coords(self.botao_item, x - raio_botao, y_botao)
         self.itemconfigure(self.ponto_item, fill=self.cor)
         self._trilho_chave = chave
 
@@ -607,8 +673,8 @@ class Janela(tk.Tk):
         super().__init__()
         self.relogio_animacao = RelogioAnimacaoWindows()
         self.title("Turing Vinyl")
-        self.geometry("1000x720")
         self.minsize(1000, 720)
+        centralizar_janela(self, 1000, 720)
         self.resizable(True, True)
         self.configure(bg=FUNDO)
         self.img_icone_header = None
@@ -617,6 +683,8 @@ class Janela(tk.Tk):
         self.config_usuario = carregar()
         self._arraste_brilho_ativo = False
         self._brilho_antes_arraste = self.config_usuario["brilho"]
+        self._sincronia_aberta = None
+        self._sincronia_pendente = False
         self.moldura_windows = None
         self.controles_spotify = ControlesSpotify()
         self.estado_controles_midia = {}
@@ -632,7 +700,7 @@ class Janela(tk.Tk):
         self.config_job = None
         self.midia, self.capa = None, None
         self._chave_texto_midia = None
-        self._posicao_controles_midia = None
+        self._posicao_controles_midia = TOPO_TRANSPORTE
         self.capa_preview = None
         self.capa_base = disco_base()
         self.rotacao_preview = RotacaoPreview(self.capa_base)
@@ -708,54 +776,79 @@ class Janela(tk.Tk):
         c.create_window(822, 19, window=self.fundo_botao, anchor="nw")
 
         self.disco_item = c.create_image(285, 263)
-        self.hero_rotulo = self.texto(529, 171, "", self.f_pequena, SECUNDARIO)
-        self.faixa_texto = self.texto(526, 209, "Esperando por você…", self.f_faixa, width=408)
+        self.hero_rotulo = self.texto(529, 146, "", self.f_pequena, SECUNDARIO)
+        self.faixa_texto = self.texto(526, TOPO_TITULO, "Esperando por você…", self.f_faixa, width=408)
         self.artista_texto = self.texto(529, 304, "", self.f_sans, SECUNDARIO)
         self.playlist_texto = self.texto(529, 333, "", self.f_pequena, SECUNDARIO)
-        self.midia_botoes, self.midia_itens = {}, {}
-        for acao, simbolo, dica, x, lado in (
-                ("aleatorio", "aleatorio", "Aleatório", 529, 48),
-                ("anterior", "anterior", "Música anterior", 589, 48),
-                ("play_pause", "play", "Reproduzir", 649, 60),
-                ("proxima", "proxima", "Próxima música", 721, 48),
-                ("repetir", "repetir", "Repetição desligada", 781, 48)):
+        self.midia_botoes = {}
+        for acao, simbolo, dica, centro, lado in (
+                ("aleatorio", "aleatorio", "Aleatório", 604, 48),
+                ("anterior", "anterior", "Música anterior", 668, 48),
+                ("play_pause", "play", "Reproduzir", 732, 60),
+                ("proxima", "proxima", "Próxima música", 796, 48),
+                ("repetir", "repetir", "Repetição desligada", 860, 48)):
             botao = Botao(self, "", lambda a=acao: self.acao_midia(a),
                            largura=lado, altura=lado, primario=acao == "play_pause",
                            simbolo=simbolo, dica=dica, midia=True)
             botao.atualizar(ativo=False)
             self.midia_botoes[acao] = botao
-            item = c.create_window(x, 331 + (60 - lado) / 2, window=botao, anchor="nw")
-            self.midia_itens[acao] = (item, x, lado)
-        self.atualizar_disco()
-        self.modo_dica = self.texto(944, 422, "", self.f_pequena, SECUNDARIO)
-        c.itemconfigure(self.modo_dica, anchor="ne")
-        self.seletor = Seletor(self, self.config_usuario["modo"], self.mudar_modo, self.f_modo, self.f_pequena)
-        c.create_window(44, 441, window=self.seletor, anchor="nw")
-        self.letras_botao = Botao(self, "Letras", self.alternar_letras, largura=120, altura=34)
-        self.letras_item = c.create_window(601, 533, window=self.letras_botao,
-                                          anchor="nw", state="hidden")
-        self.letras_status = self.texto(589, 550, "", self.f_pequena, SECUNDARIO)
-        c.itemconfigure(self.letras_status, anchor="e")
-        self.sincronia_clipe_botao = Botao(self, "Sincronia", self.ajustar_sincronia_clipe,
-                                          largura=200, altura=34,
-                                          dica="Ajustar o tempo do clipe na tela USB")
-        self.sincronia_clipe_item = c.create_window(733, 533, window=self.sincronia_clipe_botao,
-                                                    anchor="nw", state="hidden")
+            c.create_window(centro - lado / 2, TOPO_TRANSPORTE + (60 - lado) / 2, window=botao,
+                            anchor="nw", tags=("controles_midia",))
+        x_letras = 467
+        largura_letras = 100
+        intervalo_botoes = 6
+        x_sincronia = x_letras + largura_letras + intervalo_botoes
+        y_letras = TOPO_TRANSPORTE + 64
+        altura_botoes = 44
+        largura_sincronia = 184
+        y_ajuste = y_letras + altura_botoes + 1
+        tags_letras = ("controles_midia", "letras")
+        self.letras_botao = Botao(self, "Letras", self.alternar_letras, largura=largura_letras,
+                                 altura=altura_botoes,
+                                 foco_na_face=True)
+        c.create_window(x_letras, y_letras, window=self.letras_botao, anchor="nw",
+                        state="hidden", tags=tags_letras)
+        self.letras_status = self.texto(x_letras + 8, y_ajuste + 4, "", self.f_pequena, SECUNDARIO,
+                                        tags=tags_letras)
+        self.sincronia_botoes = {}
+        for canal, x in (("letras", x_sincronia), ("video", x_sincronia + largura_sincronia + intervalo_botoes)):
+            nome, _, _ = SINCRONIAS[canal]
+            botao = Botao(self, nome, lambda tipo=canal: self.alternar_sincronia(tipo),
+                          largura=largura_sincronia, altura=altura_botoes, foco_na_face=True,
+                          mostrar_ponto=False)
+            self.sincronia_botoes[canal] = botao
+            c.create_window(x, y_letras, window=botao, anchor="nw", state="hidden",
+                            tags=("controles_midia", f"sincronia_{canal}"))
+        tags_slider = ("controles_midia", "sincronia_ajuste")
+        self.sincronia_valor = c.create_text(939, y_ajuste + 12, text="", font=self.f_pequena,
+                                            fill=TEXTO, anchor="e", state="hidden", tags=tags_slider)
+        limite = LIMITE_SINCRONIA_LETRAS_MS
+        self.sincronia_slider = Slider(self, 0, self.mudar_sincronia, largura=238, altura=24,
+                                       minimo=-limite, maximo=limite, passo=25, compacto=True)
+        self.sincronia_slider.dica = Dica(self.sincronia_slider,
+                                         "Valores positivos adiantam. Negativos atrasam.")
+        c.create_window(609, y_ajuste, window=self.sincronia_slider,
+                        anchor="nw", state="hidden", tags=tags_slider)
 
-        self.texto(64, 569, "Brilho", self.f_sans)
-        self.valor_texto = self.texto(712, 569, "", self.f_valor)
+        self.atualizar_disco()
+        self.seletor = Seletor(self, self.config_usuario["modo"], self.mudar_modo, self.f_modo, self.f_pequena)
+        c.create_window(44, 466, window=self.seletor, anchor="nw")
+        self.modo_dica = c.create_text(934, 464, text="", font=self.f_pequena, fill=SECUNDARIO, anchor="se")
+
+        self.texto(64, 577, "Brilho", self.f_sans)
+        self.valor_texto = self.texto(712, 577, "", self.f_valor)
         c.itemconfigure(self.valor_texto, anchor="ne")
         self.slider = Slider(self, self.valor_brilho(), self.mudar_brilho, largura=694, fundo=FUNDO)
-        c.create_window(42, 590, window=self.slider, anchor="nw")
+        c.create_window(42, 598, window=self.slider, anchor="nw")
         self.slider.dica = Dica(self.slider, "Ajustar brilho. 0% apaga a tela e os LEDs.")
         self.auto = Botao(self, "Auto", self.automatico, largura=94, altura=48,
                           dica="Brilho automático por horário")
-        c.create_window(750, 586, window=self.auto, anchor="nw")
+        c.create_window(750, 594, window=self.auto, anchor="nw")
         self.power = Botao(self, "", self.alternar_tela, largura=48, altura=48,
                            simbolo="power", dica="Apagar tela e LEDs",
                            mostrar_ponto=False, mostrar_foco=False)
-        c.create_window(904, 586, window=self.power, anchor="nw")
-        self.brilho_dica = self.texto(64, 640, "", self.f_pequena, SECUNDARIO)
+        c.create_window(904, 594, window=self.power, anchor="nw")
+        self.brilho_dica = self.texto(64, 646, "", self.f_pequena, SECUNDARIO)
 
         self.iniciar = Botao(self, "Iniciar", self.alternar_motor, largura=150, altura=48,
                              primario=True, simbolo="play", dica="Iniciar exibição")
@@ -885,6 +978,8 @@ class Janela(tk.Tk):
             pass
 
     def fechar_paineis(self):
+        if self._sincronia_aberta is not None:
+            self.alternar_sincronia(self._sincronia_aberta)
         if self.lotus_painel is not None and self.lotus_painel.visivel:
             self.lotus_painel.fechar()
         if self.fundo_painel_aberto:
@@ -983,11 +1078,13 @@ class Janela(tk.Tk):
             self.canvas.itemconfigure(self.hero_rotulo, fill=SECUNDARIO)
             self.seletor.atualizar_cor(self.cor_modo)
             for botao in (self.auto, self.power, self.iniciar, self.fundo_botao,
-                          self.gaming_botao, self.lotus_botao, self.letras_botao):
+                          self.gaming_botao, self.lotus_botao, self.letras_botao,
+                          *self.sincronia_botoes.values()):
                 botao.atualizar(cor=self.cor_modo)
             for botao in self.midia_botoes.values():
                 botao.atualizar(cor=self.cor_modo)
             self.slider.atualizar(cor=self.cor_modo)
+            self.sincronia_slider.atualizar(cor=self.cor_modo)
             if self.fundo_painel_aberto:
                 self.fundo_painel.atualizar()
             if (self.midia or {}).get("conectada"):
@@ -1084,7 +1181,7 @@ class Janela(tk.Tk):
                                    else MODOS[self.seletor.indice][2])
         self.canvas.itemconfigure(self.modo_dica, text="")
         self.atualizar_letras()
-        self.atualizar_sincronia_clipe()
+        self.atualizar_sincronias()
         self.slider.atualizar(valor, self.cor_modo)
         if self.lotus_painel is not None and self.lotus_painel.visivel:
             self.lotus_painel.atualizar()
@@ -1095,11 +1192,52 @@ class Janela(tk.Tk):
 
     def atualizar_letras(self):
         visivel = self.config_usuario["modo"] != "video" and not self.config_usuario["gaming"]
-        self.canvas.itemconfigure(self.letras_item, state="normal" if visivel else "hidden")
+        self.canvas.itemconfigure("letras", state="normal" if visivel else "hidden")
         ativas = self.config_usuario["letras_ativas"]
         self.letras_botao.atualizar(selecionado=ativas, cor=self.cor_modo,
                                     dica="Ocultar letras na tela USB" if ativas else "Mostrar letras na tela USB")
         self.atualizar_status_letras()
+
+    def atualizar_sincronias(self):
+        modo = self.config_usuario["modo"]
+        gaming = self.config_usuario["gaming"]
+        canais_visiveis = {"letras": modo != "video" and not gaming, "video": modo == "clipe" and not gaming}
+        if self._sincronia_aberta and not canais_visiveis[self._sincronia_aberta]:
+            self._sincronia_aberta = None
+        for canal, visivel in canais_visiveis.items():
+            self.canvas.itemconfigure(f"sincronia_{canal}", state="normal" if visivel else "hidden")
+            self.sincronia_botoes[canal].atualizar(selecionado=canal == self._sincronia_aberta, cor=self.cor_modo)
+        self.canvas.itemconfigure("sincronia_ajuste", state="normal" if self._sincronia_aberta else "hidden")
+        if self._sincronia_aberta:
+            self.atualizar_slider_sincronia()
+
+    def atualizar_slider_sincronia(self):
+        _, chave, limite = SINCRONIAS[self._sincronia_aberta]
+        valor = self.config_usuario[chave]
+        self.canvas.itemconfigure(self.sincronia_valor, text=f"{valor:+d} ms" if valor else "0 ms")
+        self.sincronia_slider.atualizar(valor, self.cor_modo, limites=(-limite, limite))
+
+    def alternar_sincronia(self, canal):
+        self.sincronia_botoes[canal].dica.fechar()
+        self.sincronia_slider.dica.fechar()
+        if self.sincronia_slider.job is not None:
+            self.sincronia_slider.after_cancel(self.sincronia_slider.job)
+            self.sincronia_slider.job = None
+        if self._sincronia_pendente:
+            self.guardar()
+        self._sincronia_aberta = None if self._sincronia_aberta == canal else canal
+        self.atualizar_sincronias()
+
+    def mudar_sincronia(self, valor, aplicar):
+        if not self._sincronia_aberta:
+            return
+        _, chave, _ = SINCRONIAS[self._sincronia_aberta]
+        if valor != self.config_usuario[chave]:
+            self.config_usuario[chave] = valor
+            self._sincronia_pendente = True
+            self.atualizar_slider_sincronia()
+        if aplicar and self._sincronia_pendente:
+            self.guardar()
 
     def atualizar_status_letras(self):
         dados = self.midia or {}
@@ -1112,11 +1250,11 @@ class Janela(tk.Tk):
                 and config["modo"] == config_motor.get("modo")
                 and config_motor.get("letras_ativas") and config_motor.get("tela_ligada")):
             texto = {
-                "buscando": "Buscando letra…",
-                "pronta": "Letra pronta para exibir",
-                "exibindo": "Letra na tela USB",
-                "indisponivel": "Sem letra sincronizada",
-                "erro": "Falha temporária ao buscar letra",
+                "buscando": "Buscando…",
+                "pronta": "Pronta para exibir",
+                "exibindo": "Na tela USB",
+                "indisponivel": "Sem letra",
+                "erro": "Falha na busca",
             }.get(dados.get("status_letras"), "")
         self.canvas.itemconfigure(self.letras_status, text=texto)
 
@@ -1127,31 +1265,13 @@ class Janela(tk.Tk):
         self.atualizar_letras()
         self.guardar()
 
-    def atualizar_sincronia_clipe(self):
-        visivel = self.config_usuario["modo"] == "clipe" and not self.config_usuario["gaming"]
-        self.canvas.itemconfigure(self.sincronia_clipe_item, state="normal" if visivel else "hidden")
-        valor = self.config_usuario["adiantar_clipe_ms"]
-        rotulo = f"{valor:+d} ms" if valor else "0 ms"
-        self.sincronia_clipe_botao.atualizar(texto=f"Sincronia  {rotulo}", cor=self.cor_modo)
-
-    def ajustar_sincronia_clipe(self):
-        atual = self.config_usuario["adiantar_clipe_ms"]
-        self.sincronia_clipe_botao.dica.fechar()
-        valor = simpledialog.askinteger(
-            "Sincronia do clipe",
-            "Ajuste em milissegundos.\nPositivo adianta o clipe. Negativo atrasa.\n1000 ms equivalem a 1 segundo.",
-            parent=self, initialvalue=atual,
-            minvalue=-LIMITE_SINCRONIA_CLIPE_MS, maxvalue=LIMITE_SINCRONIA_CLIPE_MS)
-        if valor is not None and valor != atual:
-            self.config_usuario["adiantar_clipe_ms"] = valor
-            self.atualizar_sincronia_clipe()
-            self.guardar()
-
     def guardar(self):
         try:
             salvar(self.config_usuario)
         except OSError:
             self.mensagem("Não foi possível salvar as preferências.", "#966022")
+        else:
+            self._sincronia_pendente = False
         self.motor.enviar({"acao": "configurar", "config": self.config_usuario})
 
     def mudar_modo(self, modo):
@@ -1309,11 +1429,10 @@ class Janela(tk.Tk):
                                    repeticao, "Repetição"))
             botao.atualizar(**opcoes)
 
-    def posicionar_controles_midia(self, y=331):
+    def posicionar_controles_midia(self, y=TOPO_TRANSPORTE):
         if y == self._posicao_controles_midia:
             return
-        for item, x, lado in self.midia_itens.values():
-            self.canvas.coords(item, x, y + (60 - lado) / 2)
+        self.canvas.move("controles_midia", 0, y - self._posicao_controles_midia)
         self._posicao_controles_midia = y
 
     def atualizar_estado(self, dados):
@@ -1403,7 +1522,7 @@ class Janela(tk.Tk):
             self.canvas.itemconfigure(self.faixa_texto, text="Vídeo de fundo")
             self.canvas.itemconfigure(self.artista_texto, text="Preparando…" if dados.get("gaming_preparando") else
                                       self.encurtar(self.config_usuario["video_ocioso_nome"] or "", 408, self.f_sans))
-            self.canvas.coords(self.artista_texto, 529, 267)
+            self.canvas.coords(self.artista_texto, 529, TOPO_TITULO + 58)
             return
         if musica:
             titulo, artista = musica
@@ -1413,14 +1532,14 @@ class Janela(tk.Tk):
             self.canvas.itemconfigure(self.faixa_texto, text=titulo)
             self.canvas.itemconfigure(self.artista_texto, text=self.encurtar(artista, 408, self.f_sans))
             altura = texto_suave(titulo, self.f_faixa.chave, TEXTO, 408).height
-            y_artista = 209 + altura + 14
+            y_artista = TOPO_TITULO + altura + 14
             self.canvas.coords(self.artista_texto, 529, y_artista)
             playlist = dados.get("playlist_nome")
             if playlist:
                 self.canvas.coords(self.playlist_texto, 529, y_artista + 28)
                 self.canvas.itemconfigure(self.playlist_texto,
                                            text=self.encurtar(playlist, 408, self.f_pequena))
-            self.posicionar_controles_midia(max(331, y_artista + (56 if playlist else 32)))
+            self.posicionar_controles_midia(max(TOPO_TRANSPORTE, y_artista + (56 if playlist else 32)))
         else:
             self.posicionar_controles_midia()
             self.canvas.itemconfigure(self.hero_rotulo, text="")
@@ -1430,6 +1549,8 @@ class Janela(tk.Tk):
     def fechar(self):
         if self.encerrando:
             return
+        if self._sincronia_pendente:
+            self.guardar()
         self.encerrando = True
         if self.lotus_painel is not None:
             self.lotus_painel.encerrar()

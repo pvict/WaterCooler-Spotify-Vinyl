@@ -22,6 +22,7 @@ import usb.util
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageStat
 from winrt.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionManager as MediaManager,
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus as StatusReproducao,
 )
 from winrt.windows.storage.streams import Buffer, InputStreamOptions
 from turingscreencli import operations
@@ -66,7 +67,7 @@ FALHAS_MAX = 10
 ESPERA_RECONEXAO = 5
 KBPS_CLIPE = 2800
 KBPS = 5000               # reduz a fila USB mantendo o alvo de 60 FPS
-ADIANTAMENTO_LETRAS = 0.5  # segundos para compensar a exibição pela tela USB
+PAUSA_PARA_APAGAR_TELA = 120.0  # segundos sem reprodução antes de apagar o LCD
 PLAYLIST_DURACAO = 5.0
 PLAYLIST_ESPERA_INICIAL = 1.0
 PLAYLIST_ESPERA_FINAL = 0.8
@@ -75,6 +76,14 @@ MARQUEE_LARGURA = 325
 PLAYLIST_LARGURA = 240
 MARQUEE_MARGEM = 25
 MARQUEE_VELOCIDADE = 35.0
+LEGENDA_EXIBICAO_INICIAL = 20.0
+LEGENDA_INTERVALO_REEXIBICAO = 300.0
+LEGENDA_DURACAO_REEXIBICAO = 10.0
+LEGENDA_FADE = 1.0
+LEGENDA_INTERVALO_DESLOCAMENTO = 60.0
+LEGENDA_DESLOCAMENTOS = ((0, 0), (3, 0), (3, -3), (0, -3))
+TITULO_CURTO_PERIODO = 8.0
+TITULO_CURTO_AMPLITUDE = 2
 PROXIMA_ANTECEDENCIA = 22.0
 PROXIMA_DURACAO = 7.0
 PROXIMA_RETORNO_ALBUM = PROXIMA_ANTECEDENCIA - PROXIMA_DURACAO
@@ -87,9 +96,10 @@ estado = {
     "cor_viva": (30, 215, 96, 255),
     "capa_playlist": None, "cor_playlist": None, "cor_viva_playlist": None,
     "playlist_uri": None, "playlist_nome": None, "playlist_evento": 0,
-    "reproducao_id": 0, "proxima_faixa": None,
+    "reproducao_id": 0, "proxima_faixa": None, "proximo_clipe": None,
     "pedido_capa_album": None, "capa_album_api": None,
     "pos": 0.0, "dur": 0.0, "t_poll": 0.0, "tocando": False,
+    "spotify_inativo_desde": None,
     "midia_pronta": False,
     "volume": None, "volume_exibir_ate": 0.0,
     "modo_exibicao": controles.config["modo"], "ultima_midia": None,
@@ -124,8 +134,16 @@ def brilho_para(agora):
     return 30 if 1 <= h < 7 else (60 if h >= 18 or h < 1 else BRILHO_DIA)
 
 
-def brilho_tela_para(agora):
-    return brilho_para(agora) if controles.config["tela_ligada"] else 0
+def spotify_em_repouso(snap, agora):
+    if snap.get("tocando") and snap.get("musica"):
+        return False
+    # Sem uma pausa confirmada, não há imagem da faixa para manter na tela.
+    desde = snap.get("spotify_inativo_desde")
+    return desde is None or agora - desde >= PAUSA_PARA_APAGAR_TELA
+
+
+def brilho_tela_para(agora, em_repouso=False):
+    return 0 if em_repouso else brilho_para(agora)
 
 
 def fonte(nome_arquivo, tamanho):
@@ -237,6 +255,11 @@ def atualizar_proxima_faixa(reproducao, uri, nome, dados, duracao_spotify):
             log(f"Spotify a seguir: capa preparada ({nome}).")
     except Exception as exc:
         log(f"Spotify a seguir: erro preparando a capa: {exc}")
+
+
+def atualizar_proximo_clipe(dados):
+    if estado.get("reproducao_id") == dados["reproducao_id"]:
+        estado["proximo_clipe"] = dados if dados.get("uri") else None
 
 
 def atualizar_capa_album(pedido_id, musica, uri, dados):
@@ -404,6 +427,14 @@ def deslocamento_playlist(largura, tempo_visivel):
     return round(min(percorrido, percurso_playlist(largura))) - MARQUEE_MARGEM
 
 
+def opacidade_legenda(posicao):
+    if posicao < LEGENDA_INTERVALO_REEXIBICAO:
+        return 1.0 - _suave((posicao - LEGENDA_EXIBICAO_INICIAL) / LEGENDA_FADE)
+    fase = posicao % LEGENDA_INTERVALO_REEXIBICAO
+    tempo_da_borda = min(fase, LEGENDA_DURACAO_REEXIBICAO - fase)
+    return _suave(tempo_da_borda / LEGENDA_FADE)
+
+
 def renderizar(snap):
     global _cache_marquee_pos
     global _cache_marquee_titulo, _cache_marquee_img, _cache_marquee_largura
@@ -513,19 +544,32 @@ def renderizar(snap):
     # 4. Textos e Marquee (Com fade suave nas pontas)
     texto_alpha = snap.get("texto_alpha", 1.0)
     dy_texto = int(round(snap.get("texto_dy", 0.0)))
+    modo_playlist_texto = snap.get("modo_playlist_texto", False)
+    posicao_legenda = None if modo_playlist_texto else snap.get("posicao_legenda")
+    if posicao_legenda is not None:
+        texto_alpha *= opacidade_legenda(posicao_legenda)
     _img_base = None
-    if musica:
+    if musica and texto_alpha > 0.0:
+        tempo_visual = snap.get("tempo_visual")
+        if tempo_visual is None:
+            tempo_visual = time.monotonic()
+        centro_texto = cx
+        if posicao_legenda is not None:
+            etapa = int(tempo_visual // LEGENDA_INTERVALO_DESLOCAMENTO) % len(LEGENDA_DESLOCAMENTOS)
+            dx, dy = LEGENDA_DESLOCAMENTOS[etapa]
+            centro_texto += dx
+            dy_texto += dy
+
         if texto_alpha < 0.999:
             # o texto é desenhado numa camada própria para poder aplicar o fade
             _img_base = img
             img = Image.new("RGBA", (480, 480), (0, 0, 0, 0))
             d = ImageDraw.Draw(img)
-        modo_playlist_texto = snap.get("modo_playlist_texto", False)
         titulo, artista = musica
         y_texto = cy + raio_anel + 20 + dy_texto
         y_titulo = y_texto
         if modo_playlist_texto:
-            txt(d, cx, y_texto, snap.get("rotulo_aviso") or "Você está ouvindo",
+            txt(d, centro_texto, y_texto, snap.get("rotulo_aviso") or "Você está ouvindo",
                 F_ARTISTA, (200, 200, 200, 255))
             y_titulo += 25
         
@@ -534,10 +578,14 @@ def renderizar(snap):
         titulo_str = titulo or ""
         largura_titulo = d.textlength(titulo_str, font=F_TITULO)
         
-        cabe_parado = (percurso_playlist(largura_titulo) == 0 if aviso_playlist
+        cabe_uma_vez = (percurso_playlist(largura_titulo) == 0 if aviso_playlist
                        else largura_titulo <= largura_janela)
-        if cabe_parado:
-            txt(d, cx, y_titulo, titulo_str, F_TITULO, (255, 255, 255, 255))
+        if cabe_uma_vez:
+            centro_titulo = centro_texto
+            if posicao_legenda is not None:
+                fase = math.tau * (posicao_legenda % TITULO_CURTO_PERIODO) / TITULO_CURTO_PERIODO
+                centro_titulo += round(TITULO_CURTO_AMPLITUDE * math.sin(fase))
+            txt(d, centro_titulo, y_titulo, titulo_str, F_TITULO, (255, 255, 255, 255))
         else:
             if _cache_marquee_titulo != titulo_str:
                 _cache_marquee_titulo = titulo_str
@@ -552,9 +600,6 @@ def renderizar(snap):
                 )
                 _cache_marquee_largura = int(d.textlength(titulo_str + "    •    ", font=F_TITULO))
 
-            tempo_visual = snap.get("tempo_visual")
-            if tempo_visual is None:
-                tempo_visual = time.monotonic()
             if aviso_playlist:
                 inicio_leitura = snap.get("inicio_leitura_texto")
                 tempo_visivel = tempo_visual - inicio_leitura if inicio_leitura is not None else 0.0
@@ -585,11 +630,12 @@ def renderizar(snap):
             a_fade = ImageChops.multiply(a, _cache_marquee_mascara)
             janela = Image.merge("RGBA", (r, g, b, a_fade))
             
-            x_pos = cx - (largura_janela // 2)
+            x_pos = centro_texto - (largura_janela // 2)
             img.alpha_composite(janela, (x_pos, int(y_titulo)))
             
         if artista and not modo_playlist_texto:
-            txt(d, cx, y_texto + 35, cortar(d, artista, F_ARTISTA), F_ARTISTA, (200, 200, 200, 255))
+            txt(d, centro_texto, y_texto + 35, cortar(d, artista, F_ARTISTA),
+                F_ARTISTA, (200, 200, 200, 255))
 
     if _img_base is not None:
         a_txt = img.getchannel("A").point(lambda v: int(v * texto_alpha))
@@ -767,6 +813,7 @@ class Painel:
         self._diag_playlist_ativa = False
         self._diag_playlist_uri = None
         self._revisao_brilho = controles.revisao
+        self._em_repouso = False
         self._quadro_apagado = Image.new("RGB", (480, 480), (0, 0, 0))
         self._ultimo_fundo_vinil = None
         self._seguinte_fundo_vinil = None
@@ -805,6 +852,7 @@ class Painel:
         self.rotulo_aviso_alvo = None
         self.t_texto = None     # início da animação de troca de texto
         self._inicio_leitura_texto = None
+        self._posicao_legenda = None
         self.angulo = 0.0
         self.vel = 0.0
         self._v_alvo = None
@@ -820,14 +868,16 @@ class Painel:
         self._mensagem_playlist_ate = 0.0
         self._inicio_mensagem_playlist = None
 
-    def _checar_brilho(self, agora):
+    def _checar_brilho(self, agora, em_repouso):
         if self.pipe is None:
             return
-        if controles.revisao == self._revisao_brilho and agora - self.t_brilho < 2.0:
+        if (em_repouso == self._em_repouso and controles.revisao == self._revisao_brilho
+                and agora - self.t_brilho < 2.0):
             return
+        self._em_repouso = em_repouso
         self._revisao_brilho = controles.revisao
         self.t_brilho = agora
-        novo = brilho_tela_para(datetime.datetime.now())
+        novo = brilho_tela_para(datetime.datetime.now(), em_repouso)
         if novo != self.brilho:
             self.brilho = novo
             # só a thread do USB fala com a tela
@@ -1045,6 +1095,11 @@ class Painel:
                     u = _suave(u)
                     ta, dy = u, TEXTO_DESLOC * (1 - u)
 
+        # Até o fim do fade de troca, o título anterior conserva seu próprio tempo.
+        if not self.modo_playlist_texto and musica is not None and self.titulo == musica:
+            self._posicao_legenda = (posicao_atual(snap, agora)
+                                    if tocando or snap.get("dur", 0) > 0 else None)
+
         # HUD de volume
         volume_alvo = snap.get("volume")
         if volume_alvo is not None:
@@ -1066,7 +1121,8 @@ class Painel:
 
         cor = _cor_rgba(cor)
         snap.update(musica=self.titulo, capa=capa_img, cor_viva=cor, cor_capa=cor,
-                    texto_alpha=ta, texto_dy=dy, hud_alpha=_suave(self.hud),
+                    texto_alpha=ta, texto_dy=dy, posicao_legenda=self._posicao_legenda,
+                    hud_alpha=_suave(self.hud),
                     volume_visual=self.volume_anim,
                     modo_playlist_texto=self.modo_playlist_texto,
                     rotulo_aviso=self.rotulo_aviso, tempo_visual=agora,
@@ -1150,6 +1206,23 @@ class Painel:
         self._inicio_mensagem_playlist = agora
         self._proxima_mensagem_playlist = agora + max(60.0, duracao + 1.0)
 
+    def _quadro_sem_painel(self, agora_real, mostrar_fundo=False):
+        if self.letras is not None:
+            self.letras.consultar(None)
+        estado["status_letras"] = None
+        self._publicar_visual(False)
+        quadro = None
+        if mostrar_fundo:
+            if self.p or self.titulo is not None:
+                self._zerar()
+            self.p, self.estava_tocando = 0.0, False
+            if self.fundo_ocioso is not None:
+                inicio = time.perf_counter()
+                quadro = self.fundo_ocioso.proximo()
+                self._diag_tempos["fundo_ms"] = (time.perf_counter() - inicio) * 1000
+        self._checar_brilho(agora_real, quadro is None)
+        return self._quadro_apagado if quadro is None else quadro
+
     def quadro(self, agora):
         self._diag_tempos = {"fundo_ms": 0.0, "animacao_ms": 0.0,
                              "desenhar_ms": 0.0, "compor_ms": 0.0,
@@ -1157,17 +1230,19 @@ class Painel:
         dt = 0.0 if self.t_ultimo is None else min(max(agora - self.t_ultimo, 0.0), 0.2)
         self.t_ultimo = agora
         self._dt_fundo = dt
-        self._checar_brilho(agora)
+        agora_real = time.monotonic()
         config = controles.config
-        if not config["tela_ligada"]:
-            if self.letras is not None:
-                self.letras.consultar(None)
-            estado["status_letras"] = None
-            self._publicar_visual(False)
-            return self._quadro_apagado
-
-        snap = dict(estado)
         modo = config["modo"]
+        snap = dict(estado)
+        if not config["tela_ligada"]:
+            return self._quadro_sem_painel(agora_real)
+        if modo == "video":
+            self._retomar_giro_dinamico = False
+            self._capa_retomada_dinamica = self._cor_retomada_dinamica = None
+            return self._quadro_sem_painel(agora_real, mostrar_fundo=True)
+        if spotify_em_repouso(snap, agora_real):
+            return self._quadro_sem_painel(agora_real, mostrar_fundo=modo == "dinamico")
+
         letra = status_letras = None
         if self.letras is not None:
             faixa = faixa_para_letras(config, snap)
@@ -1178,12 +1253,13 @@ class Painel:
         if modo == "clipe" and self.clipe is not None:
             quadro = self.clipe.quadro(snap, agora)
             if quadro is not None:
+                self._checar_brilho(agora_real, False)
                 self._publicar_visual(False)
                 if self.clipe.letra_no_video is True:
                     estado["status_letras"] = (faixa, modo, "exibindo") if faixa is not None else None
                     return quadro
                 if letra is not None:
-                    posicao = self.clipe.posicao_letra(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
+                    posicao = self.clipe.posicao_letra(snap, time.monotonic()) + config["adiantar_letras_ms"] / 1000
                     legendado = self.visual_letras.clipe(quadro, letra, posicao)
                     estado["status_letras"] = (faixa, modo, "exibindo") if legendado is not quadro else status_letras
                     return legendado
@@ -1193,11 +1269,10 @@ class Painel:
             self._retomar_giro_dinamico = False
             self._capa_retomada_dinamica = None
             self._cor_retomada_dinamica = None
-        if modo == "video":
-            snap.update(musica=None, capa=None, tocando=False)
-        elif modo in ("spotify", "clipe") and snap.get("musica") is None:
+        if modo in ("spotify", "clipe") and snap.get("musica") is None:
             snap.update(snap.get("ultima_midia") or {
                 "musica": ("Pronto para tocar", "Abra o Spotify"), "capa": None,
+                "pos": 0.0, "dur": 0.0,
             })
             snap["tocando"] = False
         tocando = snap.get("musica") is not None and snap.get("tocando", False)
@@ -1246,7 +1321,7 @@ class Painel:
                 self._capa_retomada_dinamica = self._capa_girada()
                 self._cor_retomada_dinamica = self.cor
         mostrar = (modo in ("spotify", "clipe") or tocando
-                   or (modo != "video" and self.t_pausa is not None and agora - self.t_pausa < ATRASO_OCIOSO))
+                   or (self.t_pausa is not None and agora - self.t_pausa < ATRASO_OCIOSO))
         alvo = 1.0 if mostrar else 0.0
         if self.p < alvo:
             self.p = min(alvo, self.p + dt / FADE_ENTRA)
@@ -1255,12 +1330,9 @@ class Painel:
         ps = _suave(self.p)
 
         if (self.p <= 0.0 and not tocando) or (modo not in ("spotify", "clipe") and not tocando and self.titulo is None):
-            self._zerar()
-            self._publicar_visual(False)
-            self.estava_tocando = tocando
-            estado["status_letras"] = status_letras
-            return self._fundo(0.0)
+            return self._quadro_sem_painel(agora_real, mostrar_fundo=True)
 
+        self._checar_brilho(agora_real, False)
         bg = self._fundo(ps)
         try:
             ov = self._painel(snap, agora, dt, tocando)
@@ -1277,7 +1349,7 @@ class Painel:
         self.estava_tocando = tocando
         self._publicar_visual(self.p > 0.0 and self.capa is not None)
         if letra is not None:
-            posicao = posicao_atual(snap, time.monotonic()) + ADIANTAMENTO_LETRAS
+            posicao = posicao_atual(snap, time.monotonic()) + config["adiantar_letras_ms"] / 1000
             # A capa confirmada é da faixa atual. O painel pode ainda mostrar a anterior.
             quadro = self.visual_letras.spotify(snap.get("capa_letras"), letra, posicao)
             estado["status_letras"] = (faixa, modo, "exibindo")
@@ -1326,7 +1398,10 @@ def sessao_usb(gaming, clipe, letras):
                 for n in (111, 112, 13):
                     cmd(n)
                     time.sleep(0.05)
-                brilho = brilho_tela_para(datetime.datetime.now())
+                # Só o primeiro quadro confirma a disponibilidade do vídeo ao vivo.
+                em_repouso = not economico and (controles.config["modo"] == "video"
+                                              or spotify_em_repouso(dict(estado), time.monotonic()))
+                brilho = brilho_tela_para(datetime.datetime.now(), em_repouso)
                 operations.send_brightness_command(dev, brilho)
                 time.sleep(0.05)
                 cmd(41)
@@ -1402,6 +1477,11 @@ def sessao_usb(gaming, clipe, letras):
                         raise RuntimeError("O envio USB não encerrou; aguarde antes de iniciar outro fluxo.")
                 with contextlib.suppress(Exception):
                     cmd(123)
+                if parar.is_set():
+                    with contextlib.suppress(Exception):
+                        operations.send_brightness_command(dev, 0)
+                    with contextlib.suppress(Exception):
+                        operations.clear_image(dev)
     finally:
         controles.gaming_ativo = False
         estado["gaming_ativo"] = False
@@ -1507,12 +1587,14 @@ async def vigiar_spotify():
         log(f"capa: aviso de sessões indisponível ({exc})")
     try:
         while not parar.is_set():
-            if controles.modo_efetivo() == "video":
+            modo = controles.modo_efetivo()
+            if modo == "video":
                 if not em_video:
                     observar_sessao(None)
                     estado.update(musica=None, capa=None, album=None, capa_letras=None,
-                                  tocando=False, midia_pronta=True,
-                                  proxima_faixa=None, pedido_capa_album=None, capa_album_api=None)
+                                  tocando=False, midia_pronta=True, spotify_inativo_desde=None,
+                                  proxima_faixa=None, proximo_clipe=None, pedido_capa_album=None,
+                                  capa_album_api=None)
                     chave = capa_carregada_para = ultima_reproducao = None
                     tentativas, proxima_tentativa_capa = 0, 0.0
                     em_video = True
@@ -1521,26 +1603,34 @@ async def vigiar_spotify():
             em_video = False
             try:
                 sessao = None
-                sessoes = list(mgr.get_sessions())
-
-                for s in sessoes:
+                sessao_inativa = None
+                pausado = False
+                for s in mgr.get_sessions():
                     app_id = s.source_app_user_model_id.lower()
                     if "spotify" in app_id:
-                        status = int(s.get_playback_info().playback_status)
-                        if status == 4:
+                        status = s.get_playback_info().playback_status
+                        if status == StatusReproducao.PLAYING:
                             sessao = s
                             break
+                        if sessao_inativa is None or (not pausado and status == StatusReproducao.PAUSED):
+                            sessao_inativa = s
+                            pausado = status == StatusReproducao.PAUSED
 
-                if sessao is None and (not ESCONDER_PAUSADO or controles.modo_efetivo() in ("spotify", "clipe")):
-                    for s in sessoes:
-                        if "spotify" in s.source_app_user_model_id.lower():
-                            sessao = s
-                            break
+                tocando = sessao is not None
+                if not tocando:
+                    desde = estado["spotify_inativo_desde"] if pausado else None
+                    # Abrir o app com a música já pausada não dá mais tempo à imagem parada.
+                    if pausado and desde is None and estado["tocando"]:
+                        desde = time.monotonic()
+                    # Publica a pausa antes de abrir a capa ou consultar a posição.
+                    estado.update(tocando=False, spotify_inativo_desde=desde)
+
+                if not tocando and (not ESCONDER_PAUSADO or modo in ("spotify", "clipe")):
+                    sessao = sessao_inativa
 
                 observar_sessao(sessao)
-                tocando = sessao is not None and int(sessao.get_playback_info().playback_status) == 4
 
-                if sessao is None or (ESCONDER_PAUSADO and not tocando and controles.modo_efetivo() not in ("spotify", "clipe")):
+                if sessao is None:
                     estado.update(musica=None, capa=None, cor_capa=(30, 215, 96, 255),
                                   cor_viva=(30, 215, 96, 255), tocando=False, midia_pronta=True,
                                   album=None, capa_letras=None,
@@ -1632,6 +1722,7 @@ async def vigiar_spotify():
                         album=info.album_title,
                         capa_letras=estado.get("capa") if capa_carregada_para == nova else None,
                         t_poll=time.monotonic(), tocando=tocando,
+                        spotify_inativo_desde=None if tocando else desde,
                         reproducao_id=reproducao_id,
                         proxima_faixa=None if mudou_reproducao else estado.get("proxima_faixa"),
                     )
@@ -1668,6 +1759,7 @@ def main():
         atualizar_capa_playlist, log,
         ler_estado=lambda: dict(estado), ao_proxima=atualizar_proxima_faixa,
         ao_capa_album=atualizar_capa_album,
+        ao_proximo_clipe=atualizar_proximo_clipe,
         ao_reproducao=lambda dados: estado.update(spotify_reproducao=dados))
     watcher_playlist.iniciar()
     try:
