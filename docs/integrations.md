@@ -80,9 +80,10 @@ Use your own address, not the example. If no device appears, check Windows Bluet
 
 ### 3. Choose color and brightness
 
-- **Música:** follow the album color with smooth transitions.
+- **Dinâmico:** follow the fans and motherboard's color and brightness via OpenRGB, including the color set in **Fundo → Cor dos LEDs**. If OpenRGB is disconnected, the strip uses the album or background color determined by the app.
+- **Música:** follow the album color with strip-specific calibration.
 - **Manual:** choose a fixed color using the wheel or **RGB, HSV or HEX** inputs.
-- **Brilho da fita:** adjust the strip independently. **Tela** follows the PC LEDs' brightness.
+- **Brilho da fita:** adjust the strip independently in Música and Manual modes. **Tela** follows the PC LEDs' brightness.
 - **Ligada / Desligada:** control the strip; closing the panel keeps its settings.
 
 Turing Vinyl starts its own Bluetooth bridge. Keep the Lotus launcher closed; you do not need OpenRGB or its Effects plugin for this integration. Stopping the app leaves the strip at its last color.

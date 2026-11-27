@@ -108,7 +108,7 @@ Abra **Fundo**, clique em **Escolher vídeo** e aguarde o preparo pelo app. **Pa
   <img src="docs/images/turing-vinyl-rgb-strip.png" alt="Turing Vinyl ao lado do painel da fita RGB Bluetooth Lotus Lantern com roda de cores, campos RGB HSV HEX e slider de brilho" width="1000">
 </p>
 
-Abra **Fita RGB**. Escolha **Música** para acompanhar o álbum ou **Manual** para usar a roda de cores e os campos RGB, HSV ou HEX. O slider ajusta o brilho da fita; **Tela** acompanha o brilho dos LEDs do PC. [Guia de conexão](docs/integrations.pt-BR.md#fita-bluetooth-com-lotus-lantern).
+Abra **Fita RGB**. Escolha **Dinâmico** para acompanhar as cores e o brilho dos fans e da placa-mãe, **Música** para acompanhar o álbum com a calibração da fita ou **Manual** para definir uma cor fixa. [Guia de conexão](docs/integrations.pt-BR.md#fita-bluetooth-com-lotus-lantern).
 
 </details>
 

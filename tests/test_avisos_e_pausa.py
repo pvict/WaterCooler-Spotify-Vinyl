@@ -43,58 +43,61 @@ class AvisosEPausaTest(unittest.TestCase):
         self.assertIsNotNone(prefixo.getbbox())
         self.assertEqual(prefixo.tobytes(), visivel.tobytes())
 
-    def test_bloco_desloca_tres_pixels_em_ciclo_e_titulo_curto_oscila(self):
+    def test_titulo_curto_e_artista_ficam_fixos_durante_a_faixa(self):
+        painel = tela.Painel(None, None, 100)
         areas = ((185, 390, 295, 430), (185, 430, 295, 465))
+        faixa = dict(musica=("Sol", "Cantor"), tocando=True, dur=600)
 
-        def posicoes(agora, posicao):
-            quadro = tela.renderizar(dict(musica=("Sol", "Cantor"), cor_capa=None,
-                                          posicao_legenda=posicao, tempo_visual=agora))
-            return [quadro.crop(area).getchannel("A").getbbox()[:2] for area in areas]
+        def posicoes(agora):
+            snap = dict(faixa, pos=agora, t_poll=agora)
+            quadro = painel._painel(snap, agora, 1 / 30, tocando=True)
+            alfa = quadro.getchannel("A").point(lambda valor: 255 if valor > 192 else 0)
+            return [alfa.crop(area).getbbox() for area in areas]
 
-        titulo, artista = posicoes(0, 0)
-        for agora, dx, dy in ((59.9, 0, 0), (60, 3, 0), (120, 3, -3),
-                              (180, 0, -3), (240, 0, 0)):
+        inicio = posicoes(0)
+        self.assertTrue(all(inicio))
+        for agora in (2, 6, 59.9, 60, 120, 180, 240):
             with self.subTest(agora=agora):
-                self.assertEqual(posicoes(agora, 0), [(x + dx, y + dy) for x, y in (titulo, artista)])
+                self.assertEqual(posicoes(agora), inicio)
 
-        self.assertEqual(posicoes(2, 2), [(titulo[0] + 2, titulo[1]), artista])
-        self.assertEqual(posicoes(6, 6), [(titulo[0] - 2, titulo[1]), artista])
-
-    def test_fade_da_faixa_esconde_e_reexibe_titulo_e_artista_a_cada_cinco_minutos(self):
+    def test_titulo_e_artista_permanecem_visiveis_durante_a_faixa(self):
         areas = ((185, 390, 295, 430), (185, 430, 295, 465))
 
         def opacidades(posicao):
             quadro = tela.renderizar(dict(musica=("Sol", "Cantor"), cor_capa=None,
-                                          posicao_legenda=posicao, tempo_visual=0))
+                                          tempo_visual=posicao))
             return [quadro.crop(area).getchannel("A").getextrema()[1] for area in areas]
 
-        for tempo, alfa in ((0, 255), (20, 255), (20.5, 127), (21, 0), (120, 0),
-                            (299.9, 0), (300, 0), (300.5, 127), (301, 255),
-                            (309.5, 127), (310, 0), (601, 255), (610, 0)):
+        for tempo in (0, 20, 20.5, 21, 120, 299.9, 300, 300.5, 310, 601, 610):
             with self.subTest(tempo=tempo):
-                self.assertEqual(opacidades(tempo), [alfa, alfa])
+                self.assertEqual(opacidades(tempo), [255, 255])
 
-    def test_painel_usa_posicao_da_faixa_sem_reexibir_o_titulo_anterior_na_troca(self):
-        painel = tela.Painel(None, None, 100)
-        painel.p = 1.0
-        painel._fundo = Mock(return_value=Image.new("RGB", (480, 480), "black"))
-        config = dict(tela.controles.config, modo="spotify", tela_ligada=True)
-        snap = dict(tela.estado, musica=("Sol", "Cantor"), tocando=True,
-                    cor_viva=(0, 0, 0, 255), pos=19.5, t_poll=100.0, dur=180,
-                    spotify_inativo_desde=None, ultima_midia=None)
+    def test_painel_mantem_texto_no_vinil_e_atualiza_na_troca_de_faixa(self):
+        for modo in ("dinamico", "spotify", "clipe"):
+            with self.subTest(modo=modo):
+                painel = tela.Painel(None, None, 100)
+                painel.p = 1.0
+                painel._fundo = Mock(return_value=Image.new("RGB", (480, 480), "black"))
+                config = dict(tela.controles.config, modo=modo, tela_ligada=True)
+                snap = dict(tela.estado, musica=("Sol", "Cantor"), tocando=True,
+                            cor_viva=(0, 0, 0, 255), pos=19.5, t_poll=100.0, dur=180,
+                            spotify_inativo_desde=None, ultima_midia=None)
 
-        def mostra_texto(agora):
-            with patch.object(tela.time, "monotonic", return_value=agora):
-                quadro = painel.quadro(agora)
-            return quadro.crop((190, 391, 300, 458)).getchannel("R").getextrema()[1] == 255
+                def mostra_texto(agora):
+                    with patch.object(tela.time, "monotonic", return_value=agora):
+                        quadro = painel.quadro(agora)
+                    vermelho = quadro.getchannel("R")
+                    return all(vermelho.crop(area).getextrema()[1] >= 200
+                               for area in ((185, 390, 295, 430), (185, 430, 295, 465)))
 
-        with patch.object(tela, "estado", snap), patch.object(tela.controles, "config", config):
-            self.assertTrue(mostra_texto(100.0))
-            snap.update(pos=20.5, t_poll=101.0)
-            self.assertFalse(mostra_texto(101.5))
-            snap.update(musica=("Lua", "Cantora"), pos=0.0, t_poll=102.0)
-            self.assertFalse(mostra_texto(102.0))
-            self.assertTrue(mostra_texto(102.0 + tela.TEXTO_SAI + tela.TEXTO_ENTRA + 0.1))
+                with patch.object(tela, "estado", snap), patch.object(tela.controles, "config", config):
+                    self.assertTrue(mostra_texto(100.0))
+                    snap.update(pos=60.0, t_poll=101.0)
+                    self.assertTrue(mostra_texto(101.0))
+                    snap.update(musica=("Lua", "Cantora"), pos=0.0, t_poll=102.0)
+                    self.assertTrue(mostra_texto(102.0))
+                    self.assertTrue(mostra_texto(102.0 + tela.TEXTO_SAI + tela.TEXTO_ENTRA + 0.1))
+                    self.assertEqual(painel.titulo, ("Lua", "Cantora"))
 
     def test_fundo_do_vinil_para_de_consumir_quadros_ao_pausar_no_clipe(self):
         class Fundo:

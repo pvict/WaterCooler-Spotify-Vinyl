@@ -80,9 +80,10 @@ Use o seu endereço, não o exemplo. Se nenhum dispositivo aparecer, confira as 
 
 ### 3. Escolha cor e brilho
 
-- **Música:** acompanha a cor do álbum com transições suaves.
+- **Dinâmico:** acompanha a cor e o brilho dos fans e da placa-mãe pelo OpenRGB, inclusive a cor definida em **Fundo → Cor dos LEDs**. Quando o OpenRGB está desconectado, a fita usa a cor do álbum ou do fundo definida pelo app.
+- **Música:** acompanha a cor do álbum com a calibração da fita.
 - **Manual:** escolha uma cor fixa pela roda ou pelos campos **RGB, HSV ou HEX**.
-- **Brilho da fita:** ajusta a fita de forma independente. **Tela** acompanha o brilho dos LEDs do PC.
+- **Brilho da fita:** ajuste independente nos modos Música e Manual. **Tela** acompanha o brilho dos LEDs do PC.
 - **Ligada / Desligada:** controla a fita; fechar o painel mantém os ajustes.
 
 O Turing Vinyl inicia sua própria ponte Bluetooth. Deixe o iniciador do Lotus fechado; essa integração não exige OpenRGB nem o plugin Effects. Parar o app mantém a última cor na fita.

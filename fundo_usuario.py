@@ -16,6 +16,7 @@ from collections import deque
 from pathlib import Path
 
 from controle_interface import ARQUIVO
+from ajustes_fundo import filtro_ajustes, validar_ajustes
 
 PASTA_FUNDOS = ARQUIVO.parent / "fundos"
 FLAGS_CONVERSAO = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -83,12 +84,13 @@ class ConversorFundo:
                 if self._proc is proc:
                     self._proc = None
 
-    def iniciar(self, caminho):
+    def iniciar(self, caminho, ajustes=None):
         if self.ocupado:
             return False
         self.ocupado = True
         self.cancelamento.clear()
-        threading.Thread(target=self._converter, args=(Path(caminho),),
+        ajustes = validar_ajustes(ajustes) if ajustes is not None else None
+        threading.Thread(target=self._converter, args=(Path(caminho), ajustes),
                          name="ConverterFundo", daemon=True).start()
         return True
 
@@ -102,7 +104,7 @@ class ConversorFundo:
                 except OSError:
                     pass
 
-    def _converter(self, origem):
+    def _converter(self, origem, ajustes=None):
         temporario = None
         proc = None
         resultado = None
@@ -122,7 +124,8 @@ class ConversorFundo:
             proc = self._abrir([
                 ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-nostats",
                 "-progress", "pipe:1", "-filter_threads", "1", "-threads", "2",
-                "-i", str(origem), "-map", "0:v:0", "-vf", FILTRO_FUNDO,
+                "-i", str(origem), "-map", "0:v:0", "-vf",
+                filtro_ajustes(ajustes) if ajustes is not None else FILTRO_FUNDO,
                 "-r", "30", "-an", "-sn", "-dn", "-c:v", "libx264", "-threads", "2",
                 "-crf", "15", "-preset", "medium", "-profile:v", "baseline", "-bf", "0",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-n", str(temporario)])
@@ -167,7 +170,8 @@ class ConversorFundo:
             self._cancelado()
             os.replace(temporario, destino)
             temporario = None
-            resultado = ("pronto", {"caminho": str(destino), "nome": origem.name})
+            resultado = ("pronto", {"caminho": str(destino), "nome": origem.name,
+                                    "origem": str(origem), "ajustes": ajustes})
         except _Cancelado:
             resultado = ("cancelado", None)
         except Exception as exc:
