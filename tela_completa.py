@@ -76,10 +76,6 @@ MARQUEE_LARGURA = 325
 PLAYLIST_LARGURA = 240
 MARQUEE_MARGEM = 25
 MARQUEE_VELOCIDADE = 35.0
-LEGENDA_EXIBICAO_INICIAL = 20.0
-LEGENDA_INTERVALO_REEXIBICAO = 300.0
-LEGENDA_DURACAO_REEXIBICAO = 10.0
-LEGENDA_FADE = 1.0
 LEGENDA_INTERVALO_DESLOCAMENTO = 60.0
 LEGENDA_DESLOCAMENTOS = ((0, 0), (3, 0), (3, -3), (0, -3))
 TITULO_CURTO_PERIODO = 8.0
@@ -427,14 +423,6 @@ def deslocamento_playlist(largura, tempo_visivel):
     return round(min(percorrido, percurso_playlist(largura))) - MARQUEE_MARGEM
 
 
-def opacidade_legenda(posicao):
-    if posicao < LEGENDA_INTERVALO_REEXIBICAO:
-        return 1.0 - _suave((posicao - LEGENDA_EXIBICAO_INICIAL) / LEGENDA_FADE)
-    fase = posicao % LEGENDA_INTERVALO_REEXIBICAO
-    tempo_da_borda = min(fase, LEGENDA_DURACAO_REEXIBICAO - fase)
-    return _suave(tempo_da_borda / LEGENDA_FADE)
-
-
 def renderizar(snap):
     global _cache_marquee_pos
     global _cache_marquee_titulo, _cache_marquee_img, _cache_marquee_largura
@@ -546,8 +534,6 @@ def renderizar(snap):
     dy_texto = int(round(snap.get("texto_dy", 0.0)))
     modo_playlist_texto = snap.get("modo_playlist_texto", False)
     posicao_legenda = None if modo_playlist_texto else snap.get("posicao_legenda")
-    if posicao_legenda is not None:
-        texto_alpha *= opacidade_legenda(posicao_legenda)
     _img_base = None
     if musica and texto_alpha > 0.0:
         tempo_visual = snap.get("tempo_visual")
