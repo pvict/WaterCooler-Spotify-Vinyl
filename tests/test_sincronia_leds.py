@@ -62,7 +62,8 @@ class SincroniaLedsTests(unittest.TestCase):
              patch.object(leds_openrgb, "INTERVALO_ADDRESSABLE_EXTRA", 0), \
              patch.object(leds_openrgb, "CHECA_A_CADA", 0.005):
             pc = threading.Thread(target=leds_openrgb._laco,
-                                  args=(estado, lambda _: 100, parar, lambda _: None), daemon=True)
+                                  args=(estado, lambda _: 100, parar, lambda _: None),
+                                  kwargs={"controles": controles}, daemon=True)
             pc.start()
             fita.iniciar()
             try:
@@ -81,13 +82,12 @@ class SincroniaLedsTests(unittest.TestCase):
         self.assertEqual(len(passos_fita), 4)
 
     def test_fita_retoma_fade_local_quando_openrgb_sai(self):
-        config = {"tela_ligada": True}
+        config = {"tela_ligada": True, "cor_fundo": (200, 200, 200)}
         estado = {"modo_exibicao": "video"}
         fita = leds_lotus.LotusLantern(SimpleNamespace(config=config), estado, lambda _: 100,
                                        threading.Event(), lambda _: None)
         fita._base_cor = (20, 20, 20)
-        fita._cor_idle = (200, 200, 200)
-        estado[CHAVE_PASSO] = PassoRGB(ReferenciaRGB(None, 100), object(), 0.5)
+        estado[CHAVE_PASSO] = PassoRGB(ReferenciaRGB(None, config["cor_fundo"], 100), object(), 0.5)
 
         fita._base_cor = fita._cor_transicao(0, config)
         self.assertEqual(fita._base_cor, (110, 110, 110))
@@ -100,7 +100,7 @@ class SincroniaLedsTests(unittest.TestCase):
     def test_modo_manual_conclui_sem_aguardar_openrgb(self):
         config = {"tela_ligada": True, "lotus_modo": "manual", "lotus_cor": (10, 30, 50),
                   "lotus_brilho": 50}
-        estado = {CHAVE_PASSO: PassoRGB(ReferenciaRGB((200, 200, 200), 100), object(), 0.5)}
+        estado = {CHAVE_PASSO: PassoRGB(ReferenciaRGB(None, (200, 200, 200), 100), object(), 0.5)}
         fita = leds_lotus.LotusLantern(SimpleNamespace(config=config), estado, lambda _: 100,
                                        threading.Event(), lambda _: None)
         fita._base_cor = fita._cor_transicao(0, config)

@@ -238,8 +238,9 @@ class LotusLantern:
                 brilho = self.brilho_para(datetime.datetime.now())
             return tuple(round(c * brilho / 100) for c in cor)
         if referencia is None:
-            referencia = referencia_rgb(dict(self.estado), self.brilho_para(datetime.datetime.now()))
-        cor = referencia.capa or self._cor_idle
+            referencia = referencia_rgb(dict(self.estado), config,
+                                        self.brilho_para(datetime.datetime.now()))
+        cor = referencia.capa or referencia.fundo or self._cor_idle
         if referencia.capa is not None:
             if self._calibrar_pc is None:
                 try:

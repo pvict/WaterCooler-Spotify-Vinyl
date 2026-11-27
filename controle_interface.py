@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from ajustes_fundo import validar_ajustes
 from letras_sincronizadas import FaixaLetra
 
 MODOS = ("dinamico", "spotify", "video", "clipe")
@@ -21,6 +22,8 @@ PADRAO = {"modo": "dinamico", "brilho": None, "tela_ligada": True,
           "adiantar_clipe_ms": 0,
           "letras_ativas": False, "adiantar_letras_ms": 500,
           "video_ocioso": None, "video_ocioso_nome": "", "gaming": False,
+          "cor_fundo": None,
+          "video_origem": None, "video_ajustes": None,
           "lotus_ativo": False, "lotus_pasta": None,
           "lotus_modo": "musica", "lotus_cor": [255, 255, 255],
           "lotus_brilho": None, "lotus_endereco": None}
@@ -59,6 +62,11 @@ def validar(dados, anterior=None):
     if isinstance(cor, (list, tuple)) and len(cor) == 3 and all(
             type(c) is int and 0 <= c <= 255 for c in cor):
         config["lotus_cor"] = list(cor)
+    if "cor_fundo" in dados:
+        cor = dados["cor_fundo"]
+        if cor is None or (isinstance(cor, (list, tuple)) and len(cor) == 3 and all(
+                type(c) is int and 0 <= c <= 255 for c in cor)):
+            config["cor_fundo"] = list(cor) if cor is not None else None
     if "lotus_brilho" in dados:
         valor = dados["lotus_brilho"]
         if valor is None or (type(valor) is int and 0 <= valor <= 100):
@@ -79,6 +87,14 @@ def validar(dados, anterior=None):
             config["video_ocioso"] = caminho
     if isinstance(dados.get("video_ocioso_nome"), str):
         config["video_ocioso_nome"] = dados["video_ocioso_nome"][:240]
+    if "video_origem" in dados:
+        caminho = dados["video_origem"]
+        if caminho is None or (isinstance(caminho, str) and 0 < len(caminho) <= 2048
+                               and "\x00" not in caminho):
+            config["video_origem"] = caminho
+    if "video_ajustes" in dados:
+        config["video_ajustes"] = (None if dados["video_ajustes"] is None else
+                                  validar_ajustes(dados["video_ajustes"]))
     return config
 
 
@@ -116,6 +132,11 @@ def status_letras_atual(config, snap):
         if modo == config["modo"] and faixa == faixa_para_letras(config, snap):
             return situacao
     return ""
+
+
+def cor_leds_fundo(config):
+    """A iluminação escolhida acompanha qualquer vídeo de fundo."""
+    return config.get("cor_fundo")
 
 
 class Controles:

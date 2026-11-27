@@ -206,15 +206,15 @@ def _zonas(devs):
     return [(_chave(d, z), d, z) for d in devs for z in d.zones if _quer_zona(z.name)]
 
 
-def cores_alvo(estado, brilho, zonas, perfil):
+def cores_alvo(estado, brilho, zonas, perfil, config=None):
     """Cores desejadas por LED de cada zona, chave = 'dispositivo|zona'."""
-    referencia = referencia_rgb(dict(estado), brilho)
+    referencia = referencia_rgb(dict(estado), config or {}, brilho)
     return _cores_por_zona(referencia, zonas, perfil)
 
 
 def _cores_por_zona(referencia, zonas, perfil):
     fator = max(0, min(100, referencia.brilho)) / 100
-    cor_unica = realcar(referencia.capa) if referencia.capa is not None else None
+    cor_unica = realcar(referencia.capa) if referencia.capa is not None else referencia.fundo
     alvo = {}
     for chave, _d, z in zonas:
         n = len(z.leds)
@@ -385,7 +385,7 @@ def _ler_perfil(cli, log):
         return {}
 
 
-def _laco(estado, brilho_para, parar, log, registro=None):
+def _laco(estado, brilho_para, parar, log, registro=None, controles=None):
     cli = None
     zonas = []
     perfil = {}
@@ -398,7 +398,8 @@ def _laco(estado, brilho_para, parar, log, registro=None):
     ultimo_estado_registrado = None
 
     def ler_alvo():
-        referencia = referencia_rgb(dict(estado), brilho_para(datetime.datetime.now()))
+        config = controles.config if controles is not None else {}
+        referencia = referencia_rgb(dict(estado), config, brilho_para(datetime.datetime.now()))
         return referencia, _cores_por_zona(referencia, zonas, perfil)
 
     while not parar.is_set():
@@ -510,12 +511,12 @@ def _laco(estado, brilho_para, parar, log, registro=None):
             continue
         parar.wait(CHECA_A_CADA)
 
-def iniciar(estado, brilho_para, parar, log):
+def iniciar(estado, brilho_para, parar, log, controles=None):
     registro = RegistroLEDs(log)
 
     def executar():
         try:
-            _laco(estado, brilho_para, parar, log, registro)
+            _laco(estado, brilho_para, parar, log, registro, controles)
         finally:
             estado.pop(CHAVE_PASSO, None)
             registro.fechar()

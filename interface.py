@@ -25,8 +25,10 @@ from PIL import Image, ImageDraw, ImageFilter, ImageTk
 from aparencia_windows import preparar_janela, preparar_identidade_processo
 from controles_spotify import ControlesSpotify
 from fundo_usuario import ConversorFundo
+from editor_fundo import EditorFundo
 from leds_lotus import pasta_valida
 from painel_lotus import PainelLotus
+from painel_cor_fundo import PainelCorFundo
 from controle_interface import (LIMITE_SINCRONIA_CLIPE_MS, LIMITE_SINCRONIA_LETRAS_MS, PREFIXO,
                                 brilho_horario, carregar, salvar, reservar_execucao, liberar_execucao)
 from estilo_interface import (CanvasSuave, FonteInterface, Dica, configurar_dpi,
@@ -533,10 +535,10 @@ class Slider(CanvasSuave):
 
 class PainelFundo(CanvasSuave):
     def __init__(self, master):
-        super().__init__(master, width=452, height=248, bg=CARTAO,
+        super().__init__(master, width=452, height=350, bg=CARTAO,
                          highlightthickness=0, bd=0)
         self.janela, self.f_sans = master, master.f_sans
-        self.definir_fundo(superficie((452, 248), "#f1f1ed", raio=22))
+        self.definir_fundo(superficie((452, 350), "#f1f1ed", raio=22))
         self.create_text(24, 24, text="Fundo", anchor="nw", font=master.f_modo, fill=TEXTO)
         self.fechar = Botao(self, "", master.alternar_painel_fundo, simbolo="fechar",
                             largura=40, altura=40, fundo=CARTAO, dica="Fechar")
@@ -548,13 +550,26 @@ class PainelFundo(CanvasSuave):
         self.padrao = Botao(self, "Padrão", master.acao_fundo,
                             largura=162, altura=48, fundo=CARTAO)
         self.create_window(264, 98, window=self.padrao, anchor="nw")
-        self.percentual = self.create_text(428, 159, anchor="ne", font=master.f_pequena,
+        self.ajustar = Botao(self, "Ajustar vídeo", master.ajustar_fundo,
+                             largura=190, altura=44, fundo=CARTAO,
+                             dica="Prévia, posição, zoom e ajustes da imagem")
+        self.create_window(16, 150, window=self.ajustar, anchor="nw")
+        self.create_text(225, 172, text="Posição, zoom e imagem", font=master.f_pequena,
+                         anchor="w", fill=SECUNDARIO)
+        self.percentual = self.create_text(428, 204, anchor="ne", font=master.f_pequena,
                                            fill=SECUNDARIO)
-        self.barra = self.create_line(25, 183, 428, 183, fill="#d0d2d0", width=5,
+        self.barra = self.create_line(25, 226, 428, 226, fill="#d0d2d0", width=5,
                                       capstyle=tk.ROUND)
-        self.preenchimento = self.create_line(25, 183, 25, 183, width=5, capstyle=tk.ROUND)
-        self.status = self.create_text(24, 202, anchor="nw", font=master.f_pequena,
+        self.preenchimento = self.create_line(25, 226, 25, 226, width=5, capstyle=tk.ROUND)
+        self.status = self.create_text(24, 245, anchor="nw", font=master.f_pequena,
                                        fill=SECUNDARIO, width=405)
+        self.cor_leds = Botao(self, "Cor dos LEDs", master.abrir_cor_fundo,
+                              largura=190, altura=44, fundo=CARTAO,
+                              dica="Escolher a iluminação do vídeo de fundo")
+        self.create_window(16, 295, window=self.cor_leds, anchor="nw")
+        self.cor_amostra = self.create_oval(234, 311, 248, 325, outline="")
+        self.cor_texto = self.create_text(260, 318, anchor="w", font=master.f_pequena,
+                                        fill=SECUNDARIO)
 
     def atualizar(self):
         janela = self.janela
@@ -568,9 +583,15 @@ class PainelFundo(CanvasSuave):
                               ativo=ocupado or janela.config_usuario["video_ocioso"] is not None,
                               cor=janela.cor_modo)
         self.fechar.atualizar(cor=janela.cor_modo)
+        self.cor_leds.atualizar(cor=janela.cor_modo)
+        self.ajustar.atualizar(ativo=not ocupado, cor=janela.cor_modo)
+        cor = janela.config_usuario.get("cor_fundo")
+        hexa = "#%02X%02X%02X" % tuple(cor) if cor is not None else None
+        self.itemconfigure(self.cor_amostra, fill=hexa or janela.cor_modo)
+        self.itemconfigure(self.cor_texto, text=hexa or "Perfil original")
         progresso = janela.fundo_progresso
         valor = 0 if progresso is None else progresso
-        self.coords(self.preenchimento, 25, 183, 25 + 403 * valor / 100, 183)
+        self.coords(self.preenchimento, 25, 226, 25 + 403 * valor / 100, 226)
         self.itemconfigure(self.preenchimento, fill=janela.cor_modo,
                             state="normal" if valor > 0 else "hidden")
         self.itemconfigure(self.percentual, text=f"{valor}%" if ocupado and progresso is not None else "")
@@ -692,6 +713,8 @@ class Janela(tk.Tk):
         self.conversor_fundo = ConversorFundo()
         self.fundo_painel_aberto, self.fundo_convertendo = False, False
         self.lotus_painel = None
+        self.cor_fundo_painel = None
+        self.editor_fundo = None
         self.fundo_nome_em_preparo = ""
         self.fundo_progresso, self.fundo_pendente = 0, False
         self.fundo_status = ("Escolha um vídeo. A preparação acontece aqui no app.", SECUNDARIO)
@@ -889,6 +912,14 @@ class Janela(tk.Tk):
         else:
             self.lotus_painel.abrir()
 
+    def abrir_cor_fundo(self):
+        if self.cor_fundo_painel is None:
+            self.cor_fundo_painel = PainelCorFundo(self, Botao, Slider)
+        if self.cor_fundo_painel.visivel:
+            self.cor_fundo_painel.fechar()
+        else:
+            self.cor_fundo_painel.abrir()
+
     def alternar_lotus(self):
         ativa = not self.config_usuario.get("lotus_ativo", False)
         if ativa and not pasta_valida(self.config_usuario.get("lotus_pasta")):
@@ -918,13 +949,33 @@ class Janela(tk.Tk):
                        ("Todos os arquivos", "*.*")])
         if not caminho or self.encerrando:
             return
-        if self.conversor_fundo.iniciar(caminho):
+        self.abrir_editor_fundo(caminho)
+
+    def ajustar_fundo(self):
+        if self.fundo_convertendo:
+            return
+        config = self.config_usuario
+        origem = config.get("video_origem") or config["video_ocioso"] or str(RAIZ / "video_fundo.mp4")
+        self.abrir_editor_fundo(origem, config.get("video_ajustes"))
+
+    def abrir_editor_fundo(self, caminho, ajustes=None):
+        if self.editor_fundo is None:
+            self.editor_fundo = EditorFundo(self, Botao, Slider)
+        self.editor_fundo.abrir(caminho, ajustes)
+
+    def preparar_fundo(self, caminho, ajustes):
+        if self.fundo_convertendo or self.conversor_fundo.ocupado:
+            self.mensagem("Aguarde a preparação do fundo atual.", "#966022")
+            return False
+        if self.conversor_fundo.iniciar(caminho, ajustes):
             self.fundo_convertendo = True
             self.fundo_nome_em_preparo = Path(caminho).name
             self.fundo_progresso = 0
             self.fundo_status = ("Abrindo o vídeo…", SECUNDARIO)
             self.fundo_botao.atualizar(texto="Preparando…")
             self.fundo_painel.atualizar()
+            return True
+        return False
 
     def acao_fundo(self):
         if self.fundo_convertendo:
@@ -934,13 +985,14 @@ class Janela(tk.Tk):
         else:
             self.definir_fundo(None, "")
 
-    def definir_fundo(self, caminho, nome):
-        anterior = (self.config_usuario["video_ocioso"], self.config_usuario["video_ocioso_nome"])
-        self.config_usuario.update(video_ocioso=caminho, video_ocioso_nome=nome)
+    def definir_fundo(self, caminho, nome, origem=None, ajustes=None):
+        anterior = dict(self.config_usuario)
+        self.config_usuario.update(video_ocioso=caminho, video_ocioso_nome=nome,
+                                   video_origem=origem, video_ajustes=ajustes)
         try:
             salvar(self.config_usuario)
         except OSError:
-            self.config_usuario.update(video_ocioso=anterior[0], video_ocioso_nome=anterior[1])
+            self.config_usuario = anterior
             self.fundo_status = ("Não foi possível salvar o novo fundo. O anterior foi mantido.", "#966022")
             self.fundo_painel.atualizar()
             return
@@ -966,7 +1018,8 @@ class Janela(tk.Tk):
                     if self.conversor_fundo.cancelamento.is_set():
                         tipo = "cancelado"
                     if tipo == "pronto":
-                        self.definir_fundo(dados["caminho"], dados["nome"])
+                        self.definir_fundo(dados["caminho"], dados["nome"],
+                                           dados.get("origem"), dados.get("ajustes"))
                     elif tipo == "cancelado":
                         self.fundo_progresso = 0
                         self.fundo_status = ("Preparação cancelada. O fundo anterior foi mantido.", SECUNDARIO)
@@ -980,6 +1033,10 @@ class Janela(tk.Tk):
     def fechar_paineis(self):
         if self._sincronia_aberta is not None:
             self.alternar_sincronia(self._sincronia_aberta)
+        if self.editor_fundo is not None and self.editor_fundo.visivel:
+            self.editor_fundo.fechar()
+        if self.cor_fundo_painel is not None and self.cor_fundo_painel.visivel:
+            self.cor_fundo_painel.fechar()
         if self.lotus_painel is not None and self.lotus_painel.visivel:
             self.lotus_painel.fechar()
         if self.fundo_painel_aberto:
@@ -1185,6 +1242,8 @@ class Janela(tk.Tk):
         self.slider.atualizar(valor, self.cor_modo)
         if self.lotus_painel is not None and self.lotus_painel.visivel:
             self.lotus_painel.atualizar()
+        if self.cor_fundo_painel is not None and self.cor_fundo_painel.visivel:
+            self.cor_fundo_painel.atualizar()
         self.canvas.itemconfigure(self.brilho_dica, text="")
         # As informações iniciais também respeitam o modo salvo na última sessão.
         if hasattr(self, "artista_texto"):
@@ -1273,6 +1332,7 @@ class Janela(tk.Tk):
         else:
             self._sincronia_pendente = False
         self.motor.enviar({"acao": "configurar", "config": self.config_usuario})
+        self.fundo_painel.atualizar()
 
     def mudar_modo(self, modo):
         self.config_usuario["modo"] = modo
@@ -1474,6 +1534,8 @@ class Janela(tk.Tk):
                                       ". Clique para ajustar cor e brilho.")
         if self.lotus_painel is not None and self.lotus_painel.visivel:
             self.lotus_painel.atualizar()
+        if self.cor_fundo_painel is not None and self.cor_fundo_painel.visivel:
+            self.cor_fundo_painel.atualizar()
         if dados.get("erro"):
             self.mensagem(dados["erro"], "#966022")
         elif self.config_usuario.get("lotus_ativo") and lotus.get("erro"):
@@ -1552,6 +1614,12 @@ class Janela(tk.Tk):
         if self._sincronia_pendente:
             self.guardar()
         self.encerrando = True
+        if self.editor_fundo is not None:
+            self.editor_fundo.encerrar()
+            self.editor_fundo = None
+        if self.cor_fundo_painel is not None:
+            self.cor_fundo_painel.encerrar()
+            self.cor_fundo_painel = None
         if self.lotus_painel is not None:
             self.lotus_painel.encerrar()
             self.lotus_painel = None

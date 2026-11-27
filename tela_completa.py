@@ -1780,7 +1780,7 @@ def main():
     watcher_playlist.iniciar()
     try:
         import leds_openrgb
-        leds_openrgb.iniciar(estado, brilho_para, parar, log)
+        leds_openrgb.iniciar(estado, brilho_para, parar, log, controles=controles)
     except ImportError as exc:
         log(f"LEDs desligados (openrgb-python não instalado): {exc}")
     
