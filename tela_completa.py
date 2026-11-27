@@ -76,10 +76,6 @@ MARQUEE_LARGURA = 325
 PLAYLIST_LARGURA = 240
 MARQUEE_MARGEM = 25
 MARQUEE_VELOCIDADE = 35.0
-LEGENDA_INTERVALO_DESLOCAMENTO = 60.0
-LEGENDA_DESLOCAMENTOS = ((0, 0), (3, 0), (3, -3), (0, -3))
-TITULO_CURTO_PERIODO = 8.0
-TITULO_CURTO_AMPLITUDE = 2
 PROXIMA_ANTECEDENCIA = 22.0
 PROXIMA_DURACAO = 7.0
 PROXIMA_RETORNO_ALBUM = PROXIMA_ANTECEDENCIA - PROXIMA_DURACAO
@@ -533,19 +529,8 @@ def renderizar(snap):
     texto_alpha = snap.get("texto_alpha", 1.0)
     dy_texto = int(round(snap.get("texto_dy", 0.0)))
     modo_playlist_texto = snap.get("modo_playlist_texto", False)
-    posicao_legenda = None if modo_playlist_texto else snap.get("posicao_legenda")
     _img_base = None
     if musica and texto_alpha > 0.0:
-        tempo_visual = snap.get("tempo_visual")
-        if tempo_visual is None:
-            tempo_visual = time.monotonic()
-        centro_texto = cx
-        if posicao_legenda is not None:
-            etapa = int(tempo_visual // LEGENDA_INTERVALO_DESLOCAMENTO) % len(LEGENDA_DESLOCAMENTOS)
-            dx, dy = LEGENDA_DESLOCAMENTOS[etapa]
-            centro_texto += dx
-            dy_texto += dy
-
         if texto_alpha < 0.999:
             # o texto é desenhado numa camada própria para poder aplicar o fade
             _img_base = img
@@ -555,7 +540,7 @@ def renderizar(snap):
         y_texto = cy + raio_anel + 20 + dy_texto
         y_titulo = y_texto
         if modo_playlist_texto:
-            txt(d, centro_texto, y_texto, snap.get("rotulo_aviso") or "Você está ouvindo",
+            txt(d, cx, y_texto, snap.get("rotulo_aviso") or "Você está ouvindo",
                 F_ARTISTA, (200, 200, 200, 255))
             y_titulo += 25
         
@@ -567,11 +552,7 @@ def renderizar(snap):
         cabe_uma_vez = (percurso_playlist(largura_titulo) == 0 if aviso_playlist
                        else largura_titulo <= largura_janela)
         if cabe_uma_vez:
-            centro_titulo = centro_texto
-            if posicao_legenda is not None:
-                fase = math.tau * (posicao_legenda % TITULO_CURTO_PERIODO) / TITULO_CURTO_PERIODO
-                centro_titulo += round(TITULO_CURTO_AMPLITUDE * math.sin(fase))
-            txt(d, centro_titulo, y_titulo, titulo_str, F_TITULO, (255, 255, 255, 255))
+            txt(d, cx, y_titulo, titulo_str, F_TITULO, (255, 255, 255, 255))
         else:
             if _cache_marquee_titulo != titulo_str:
                 _cache_marquee_titulo = titulo_str
@@ -586,6 +567,9 @@ def renderizar(snap):
                 )
                 _cache_marquee_largura = int(d.textlength(titulo_str + "    •    ", font=F_TITULO))
 
+            tempo_visual = snap.get("tempo_visual")
+            if tempo_visual is None:
+                tempo_visual = time.monotonic()
             if aviso_playlist:
                 inicio_leitura = snap.get("inicio_leitura_texto")
                 tempo_visivel = tempo_visual - inicio_leitura if inicio_leitura is not None else 0.0
@@ -616,11 +600,11 @@ def renderizar(snap):
             a_fade = ImageChops.multiply(a, _cache_marquee_mascara)
             janela = Image.merge("RGBA", (r, g, b, a_fade))
             
-            x_pos = centro_texto - (largura_janela // 2)
+            x_pos = cx - (largura_janela // 2)
             img.alpha_composite(janela, (x_pos, int(y_titulo)))
             
         if artista and not modo_playlist_texto:
-            txt(d, centro_texto, y_texto + 35, cortar(d, artista, F_ARTISTA),
+            txt(d, cx, y_texto + 35, cortar(d, artista, F_ARTISTA),
                 F_ARTISTA, (200, 200, 200, 255))
 
     if _img_base is not None:
@@ -843,7 +827,6 @@ class Painel:
         self.rotulo_aviso_alvo = None
         self.t_texto = None     # início da animação de troca de texto
         self._inicio_leitura_texto = None
-        self._posicao_legenda = None
         self.angulo = 0.0
         self.vel = 0.0
         self._v_alvo = None
@@ -1086,11 +1069,6 @@ class Painel:
                     u = _suave(u)
                     ta, dy = u, TEXTO_DESLOC * (1 - u)
 
-        # Até o fim do fade de troca, o título anterior conserva seu próprio tempo.
-        if not self.modo_playlist_texto and musica is not None and self.titulo == musica:
-            self._posicao_legenda = (posicao_atual(snap, agora)
-                                    if tocando or snap.get("dur", 0) > 0 else None)
-
         # HUD de volume
         volume_alvo = snap.get("volume")
         if volume_alvo is not None:
@@ -1112,7 +1090,7 @@ class Painel:
 
         cor = _cor_rgba(cor)
         snap.update(musica=self.titulo, capa=capa_img, cor_viva=cor, cor_capa=cor,
-                    texto_alpha=ta, texto_dy=dy, posicao_legenda=self._posicao_legenda,
+                    texto_alpha=ta, texto_dy=dy,
                     hud_alpha=_suave(self.hud),
                     volume_visual=self.volume_anim,
                     modo_playlist_texto=self.modo_playlist_texto,

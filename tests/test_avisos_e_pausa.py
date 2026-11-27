@@ -43,29 +43,29 @@ class AvisosEPausaTest(unittest.TestCase):
         self.assertIsNotNone(prefixo.getbbox())
         self.assertEqual(prefixo.tobytes(), visivel.tobytes())
 
-    def test_bloco_desloca_tres_pixels_em_ciclo_e_titulo_curto_oscila(self):
+    def test_titulo_curto_e_artista_ficam_fixos_durante_a_faixa(self):
+        painel = tela.Painel(None, None, 100)
         areas = ((185, 390, 295, 430), (185, 430, 295, 465))
+        faixa = dict(musica=("Sol", "Cantor"), tocando=True, dur=600)
 
-        def posicoes(agora, posicao):
-            quadro = tela.renderizar(dict(musica=("Sol", "Cantor"), cor_capa=None,
-                                          posicao_legenda=posicao, tempo_visual=agora))
-            return [quadro.crop(area).getchannel("A").getbbox()[:2] for area in areas]
+        def posicoes(agora):
+            snap = dict(faixa, pos=agora, t_poll=agora)
+            quadro = painel._painel(snap, agora, 1 / 30, tocando=True)
+            alfa = quadro.getchannel("A").point(lambda valor: 255 if valor > 192 else 0)
+            return [alfa.crop(area).getbbox() for area in areas]
 
-        titulo, artista = posicoes(0, 0)
-        for agora, dx, dy in ((59.9, 0, 0), (60, 3, 0), (120, 3, -3),
-                              (180, 0, -3), (240, 0, 0)):
+        inicio = posicoes(0)
+        self.assertTrue(all(inicio))
+        for agora in (2, 6, 59.9, 60, 120, 180, 240):
             with self.subTest(agora=agora):
-                self.assertEqual(posicoes(agora, 0), [(x + dx, y + dy) for x, y in (titulo, artista)])
-
-        self.assertEqual(posicoes(2, 2), [(titulo[0] + 2, titulo[1]), artista])
-        self.assertEqual(posicoes(6, 6), [(titulo[0] - 2, titulo[1]), artista])
+                self.assertEqual(posicoes(agora), inicio)
 
     def test_titulo_e_artista_permanecem_visiveis_durante_a_faixa(self):
         areas = ((185, 390, 295, 430), (185, 430, 295, 465))
 
         def opacidades(posicao):
             quadro = tela.renderizar(dict(musica=("Sol", "Cantor"), cor_capa=None,
-                                          posicao_legenda=posicao, tempo_visual=0))
+                                          tempo_visual=posicao))
             return [quadro.crop(area).getchannel("A").getextrema()[1] for area in areas]
 
         for tempo in (0, 20, 20.5, 21, 120, 299.9, 300, 300.5, 310, 601, 610):
