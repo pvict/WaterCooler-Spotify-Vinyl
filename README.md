@@ -110,7 +110,7 @@ Open **Fundo**, click **Escolher vídeo** and let the app prepare it. **Padrão*
   <img src="docs/images/turing-vinyl-rgb-strip.png" alt="Turing Vinyl alongside its Lotus Lantern Bluetooth RGB strip panel with color wheel, RGB HSV HEX inputs and brightness slider" width="1000">
 </p>
 
-Open **Fita RGB**. Choose **Música** to follow the album or **Manual** for the color wheel and RGB, HSV or HEX inputs. The brightness slider adjusts the strip; **Tela** follows the PC LEDs' brightness. [Connection guide](docs/integrations.md#bluetooth-strip-with-lotus-lantern).
+Open **Fita RGB**. Choose **Dinâmico** to follow the fans and motherboard's colors and brightness, **Música** to follow the album with strip-specific calibration, or **Manual** to set a fixed color. [Connection guide](docs/integrations.md#bluetooth-strip-with-lotus-lantern).
 
 </details>
 

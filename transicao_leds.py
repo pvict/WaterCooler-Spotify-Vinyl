@@ -17,6 +17,7 @@ class PassoRGB(NamedTuple):
     referencia: ReferenciaRGB
     transicao: object | None
     peso: float
+    cor_pc: tuple | None = None
 
 
 def referencia_rgb(estado, config, brilho):

@@ -18,16 +18,20 @@ class PainelLotus(PainelCor):
         self.ligar = botao(self, "Desligada", janela.alternar_lotus, largura=160, altura=44,
                            simbolo="power", dica="Ligar fita", mostrar_foco=False)
         self.canvas.create_window(358, 52, window=self.ligar, anchor="nw")
-        self.musica = botao(self, "Música", lambda: self.modo("musica"), largura=245, altura=48,
-                            dica="Acompanhar a cor do álbum")
-        self.manual = botao(self, "Manual", lambda: self.modo("manual"), largura=245, altura=48,
+        self.musica = botao(self, "Música", lambda: self.modo("musica"), largura=162, altura=48,
+                            dica="Acompanhar a cor do álbum com a calibração da fita")
+        self.dinamico = botao(self, "Dinâmico", lambda: self.modo("dinamico"), largura=162, altura=48,
+                              dica="Acompanhar as cores e o brilho dos fans e da placa-mãe")
+        self.manual = botao(self, "Manual", lambda: self.modo("manual"), largura=162, altura=48,
                             dica="Escolher uma cor fixa para a fita")
         self.canvas.create_window(20, 96, window=self.musica, anchor="nw")
-        self.canvas.create_window(275, 96, window=self.manual, anchor="nw")
+        self.canvas.create_window(189, 96, window=self.dinamico, anchor="nw")
+        self.canvas.create_window(358, 96, window=self.manual, anchor="nw")
 
     def construir_rodape(self, botao, slider):
         janela = self.janela
-        self.canvas.create_text(32, 592, text="Brilho da fita", font=janela.f_sans, fill=TEXTO, anchor="nw")
+        self.brilho_rotulo = self.canvas.create_text(32, 592, text="Brilho da fita",
+                                                    font=janela.f_sans, fill=TEXTO, anchor="nw")
         self.brilho_item = self.canvas.create_text(508, 592, text="", font=janela.f_sans, fill=TEXTO, anchor="ne")
         self.brilho = slider(self, 100, self.mudar_brilho, largura=400, fundo=FUNDO)
         self.canvas.create_window(12, 616, window=self.brilho, anchor="nw")
@@ -82,21 +86,28 @@ class PainelLotus(PainelCor):
         config = self.janela.config_usuario
         ligada = config.get("lotus_ativo", False)
         cor = self.janela.cor_modo
-        valor = config.get("lotus_brilho")
+        modo = config.get("lotus_modo")
+        segue_pc = modo == "dinamico"
+        valor = None if segue_pc else config.get("lotus_brilho")
         automatico = valor is None
         if automatico:
             valor = (config["brilho"] if config["brilho"] is not None else brilho_horario()) if config["tela_ligada"] else 0
         iluminada = (ligada and config["tela_ligada"] and valor > 0
-                      and (config.get("lotus_modo") != "manual" or any(config["lotus_cor"])))
+                      and (modo != "manual" or any(config["lotus_cor"])))
         rotulo = "Ligada" if iluminada else "Em espera" if ligada else "Desligada"
         self.ligar.atualizar(texto=rotulo, selecionado=ligada, cor=cor, mostrar_ponto=iluminada,
                              dica="Desativar fita" if ligada else "Ligar fita")
-        self.musica.atualizar(selecionado=config.get("lotus_modo") == "musica", cor=cor)
-        self.manual.atualizar(selecionado=config.get("lotus_modo") == "manual", cor=cor)
+        self.musica.atualizar(selecionado=modo == "musica", cor=cor)
+        self.dinamico.atualizar(selecionado=segue_pc, cor=cor)
+        self.manual.atualizar(selecionado=modo == "manual", cor=cor)
         for formato, botao in self.formatos.items():
             botao.atualizar(selecionado=self.formato == formato, cor=cor)
-        self.brilho.atualizar(valor=valor, cor=cor)
-        self.auto.atualizar(selecionado=automatico, cor=cor)
+        self.brilho.configure(state="disabled" if segue_pc else "normal", takefocus=not segue_pc,
+                              cursor="arrow" if segue_pc else "hand2")
+        self.brilho.atualizar(valor=valor, cor=SECUNDARIO if segue_pc else cor)
+        self.auto.atualizar(ativo=not segue_pc, selecionado=automatico, cor=cor)
+        self.canvas.itemconfigure(self.brilho_rotulo,
+                                  text="Brilho sincronizado com o PC" if segue_pc else "Brilho da fita")
         self.canvas.itemconfigure(self.brilho_item, text=f"{valor}%")
         estado = (self.janela.midia or {}).get("lotus") or {}
         if not ligada:

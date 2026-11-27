@@ -444,6 +444,10 @@ def _laco(estado, brilho_para, parar, log, registro=None, controles=None):
                 perfil = _ler_perfil(cli, log)
                 modos = [_modo_fixo(d) for d in devs]
                 zonas = _zonas(devs)
+                # A fita tem uma cor só. Priorize o header ARGB dos fans.
+                chave_rgb = min((chave for chave, _, zona in zonas if zona.leds),
+                                key=lambda chave: "addressable header" not in chave.lower(),
+                                default=None)
                 log(f"openrgb: controlando zonas {[k for k, _, _ in zonas]} {modos}")
                 if registro is not None:
                     registro.registrar("conexao_sdk", dispositivos=todos, modos=modos,
@@ -473,10 +477,11 @@ def _laco(estado, brilho_para, parar, log, registro=None, controles=None):
                     cores = _misturar(inicio, novo, peso)
 
                     def publicar_passo():
-                        estado[CHAVE_PASSO] = PassoRGB(referencia, transicao, peso)
+                        estado[CHAVE_PASSO] = PassoRGB(
+                            referencia, transicao, peso, cores[chave_rgb][0])
 
                     if _enviar_etapa(zonas, cores, escrito, i, passos, parar, log, registro,
-                                     publicar_passo if zonas else None):
+                                     publicar_passo if chave_rgb is not None else None):
                         return
                     atual = cores
 
@@ -488,11 +493,10 @@ def _laco(estado, brilho_para, parar, log, registro=None, controles=None):
                         registro.registrar("fim_fade_sdk", passos=passos)
                 continue
 
-            if zonas:
-                passo = estado.get(CHAVE_PASSO)
-                # A calibração ou o brilho podem manter o mesmo RGB na placa.
-                if passo is None or passo.referencia != referencia or passo.peso != 1:
-                    estado[CHAVE_PASSO] = PassoRGB(referencia, None, 1.0)
+            if chave_rgb is not None:
+                passo = PassoRGB(referencia, None, 1.0, novo[chave_rgb][0])
+                if estado.get(CHAVE_PASSO) != passo:
+                    estado[CHAVE_PASSO] = passo
 
         except Exception as exc:
             estado.pop(CHAVE_PASSO, None)

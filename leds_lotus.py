@@ -231,7 +231,8 @@ class LotusLantern:
             # O controle principal prevalece também sobre o brilho manual
             # da fita. As preferências dela ficam preservadas para a volta.
             return (0, 0, 0)
-        if config.get("lotus_modo") == "manual":
+        modo = config.get("lotus_modo")
+        if modo == "manual":
             cor = config.get("lotus_cor", [255, 255, 255])
             brilho = config.get("lotus_brilho")
             if brilho is None:
@@ -258,16 +259,22 @@ class LotusLantern:
                     cor, _ajustar_vermelho_musica(cor, self._cor_pc))
                 self.log(f"lotus: cor da capa={cor}; referência do PC={self._cor_pc}; "
                          f"referência da fita={self._cor_fita}")
-            cor = self._cor_fita
-        brilho = config.get("lotus_brilho")
+            cor = self._cor_pc if modo == "dinamico" else self._cor_fita
+        brilho = referencia.brilho if modo == "dinamico" else config.get("lotus_brilho")
         if brilho is None:
             brilho = referencia.brilho
         brilho = max(0, min(100, brilho)) / 100
         return tuple(int(max(0, min(255, c)) * brilho) for c in cor)
 
     def _cor_transicao(self, agora, config):
-        manual = config.get("lotus_modo") == "manual"
+        modo = config.get("lotus_modo")
+        manual = modo == "manual"
         passo = self.estado.get(CHAVE_PASSO) if not manual and config["tela_ligada"] else None
+        if modo == "dinamico" and passo is not None and passo.cor_pc is not None:
+            cor = passo.cor_pc
+            self._chave_cor, self._inicio_cor, self._inicio_fade = cor, cor, agora
+            self._transicao_pc = None
+            return cor
         alvo = self._cor_alvo(passo.referencia if passo is not None else None, config)
         if passo is not None and passo.transicao is not None and (
                 passo.peso < 1 or passo.transicao is self._transicao_pc):

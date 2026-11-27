@@ -12,7 +12,7 @@ class PainelCorFundo(PainelCor):
     def construir_cabecalho(self, botao):
         self.canvas.itemconfigure(self.status_item, width=475)
         self.explicacao = self.canvas.create_text(
-            25, 95, text="Com qualquer vídeo de fundo, ilumina o PC e a fita no modo Música.\n"
+            25, 95, text="Ilumina o PC e a fita nos modos Dinâmico e Música.\n"
             "Durante as músicas, os LEDs continuam seguindo a capa.",
             font=self.janela.f_pequena, fill=SECUNDARIO, anchor="nw", width=475)
 

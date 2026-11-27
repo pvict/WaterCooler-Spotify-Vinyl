@@ -56,7 +56,7 @@ def validar(dados, anterior=None):
         config["letras_ativas"] = dados["letras_ativas"]
     if type(dados.get("lotus_ativo")) is bool:
         config["lotus_ativo"] = dados["lotus_ativo"]
-    if dados.get("lotus_modo") in ("musica", "manual"):
+    if dados.get("lotus_modo") in ("musica", "dinamico", "manual"):
         config["lotus_modo"] = dados["lotus_modo"]
     cor = dados.get("lotus_cor")
     if isinstance(cor, (list, tuple)) and len(cor) == 3 and all(
